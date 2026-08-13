@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+venv/
+
+.vscode/
+
+config.ini
+*.xml
+
+data/
+logs/
+
+Thumbs.db
+Desktop.ini
