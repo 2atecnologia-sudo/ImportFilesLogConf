@@ -14,3 +14,10 @@ Thumbs.db
 Desktop.ini
 
 *.bat
+
+# SEFAZ downloader (não versionar dados locais)
+external/sefaz_downloader/config/config.ini
+external/sefaz_downloader/database/
+external/sefaz_downloader/logs/
+external/sefaz_downloader/temp/
+external/sefaz_downloader/xml/
