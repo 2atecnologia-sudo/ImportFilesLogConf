@@ -9,6 +9,10 @@ import pystray
 from PIL import Image
 
 APP_NAME = "ImportFilesLogConf"
+APP_VERSION = "1.0.0"
+APP_COMPANY = "SUA_EMPRESA_AQUI"
+APP_CONTACT = "suporte@seudominio.com"
+
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 _importer_proc = None  # subprocess.Popen | None
@@ -123,10 +127,19 @@ def show_status(icon, item=None):
     _msg_info(APP_NAME, msg)
 
 
+def show_about(icon, item=None):
+    about = (
+        f"{APP_NAME}\n\n"
+        f"Desenvolvido por: {APP_COMPANY}\n"
+        f"Versão: {APP_VERSION}\n"
+        f"Contato: {APP_CONTACT}\n"
+    )
+    _msg_info("Sobre", about)
+
+
 def open_sefaz_manual(icon, item=None):
     """
     Abre a interface do SEFAZ Downloader em modo manual.
-    Não agenda nem roda automático: você controla pelo botão dentro da janela.
     """
     sefaz_dir = os.path.join(BASE_DIR, "external", "sefaz_downloader")
     main_py = os.path.join(sefaz_dir, "main.py")
@@ -156,6 +169,7 @@ def quit_all(icon, item=None):
 def run_tray():
     menu = pystray.Menu(
         pystray.MenuItem("Status", show_status, default=True),
+        pystray.MenuItem("Sobre", show_about),
         pystray.MenuItem("Configuração", open_config),
         pystray.MenuItem("Abrir SEFAZ Downloader (Manual)", open_sefaz_manual),
         pystray.MenuItem("Abrir pasta de entrada", open_input_folder),
