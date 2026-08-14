@@ -12,3 +12,5 @@ logs/
 
 Thumbs.db
 Desktop.ini
+
+*.bat
