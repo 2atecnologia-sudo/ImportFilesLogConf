@@ -14,6 +14,20 @@ BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 _importer_proc = None  # subprocess.Popen | None
 
 
+def _msg_info(title: str, text: str):
+    root = tk.Tk()
+    root.withdraw()
+    messagebox.showinfo(title, text)
+    root.destroy()
+
+
+def _msg_error(title: str, text: str):
+    root = tk.Tk()
+    root.withdraw()
+    messagebox.showerror(title, text)
+    root.destroy()
+
+
 def make_icon(rgb):
     return Image.new("RGB", (64, 64), rgb)
 
@@ -78,19 +92,17 @@ def restart_importer(icon, item=None):
 
 
 def open_config(icon, item=None):
-    # abre a tela de config
     subprocess.Popen([sys.executable, "-m", "src.config_ui"], cwd=BASE_DIR)
 
 
 def open_logs(icon, item=None):
-    # abre a pasta logs do projeto (onde está importador.log)
-    log_dir = os.path.join(BASE_DIR, "logs")
-    os.makedirs(log_dir, exist_ok=True)
-    os.startfile(log_dir)
+    from .settings import load_settings
+    s = load_settings()
+    os.makedirs(s.logging.log_dir, exist_ok=True)
+    os.startfile(s.logging.log_dir)
 
 
 def open_input_folder(icon, item=None):
-    # usa o config.ini pra saber a pasta real
     from .settings import load_settings
     s = load_settings()
     os.makedirs(s.watch.input_dir, exist_ok=True)
@@ -101,18 +113,37 @@ def show_status(icon, item=None):
     from .settings import load_settings
     s = load_settings()
 
-    root = tk.Tk()
-    root.withdraw()
-
     msg = (
-        f"Status: {'RODANDO' if importer_running() else 'PARADO'}\n\n"
+        f"Importador: {'RODANDO' if importer_running() else 'PARADO'}\n\n"
         f"Formato: {s.app.input_format}\n"
         f"Pasta entrada: {s.watch.input_dir}\n"
         f"Servidor SQL: {s.sql.server}\n"
         f"Banco: {s.sql.database}\n"
     )
-    messagebox.showinfo(APP_NAME, msg)
-    root.destroy()
+    _msg_info(APP_NAME, msg)
+
+
+def open_sefaz_manual(icon, item=None):
+    """
+    Abre a interface do SEFAZ Downloader em modo manual.
+    Não agenda nem roda automático: você controla pelo botão dentro da janela.
+    """
+    sefaz_dir = os.path.join(BASE_DIR, "external", "sefaz_downloader")
+    main_py = os.path.join(sefaz_dir, "main.py")
+
+    if not os.path.exists(main_py):
+        _msg_error(APP_NAME, f"SEFAZ Downloader não encontrado:\n{main_py}")
+        return
+
+    creationflags = 0
+    if os.name == "nt":
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+
+    subprocess.Popen(
+        [sys.executable, main_py],
+        cwd=sefaz_dir,
+        creationflags=creationflags,
+    )
 
 
 def quit_all(icon, item=None):
@@ -124,28 +155,22 @@ def quit_all(icon, item=None):
 
 def run_tray():
     menu = pystray.Menu(
-    pystray.MenuItem("Status", show_status, default=True),
-    pystray.MenuItem("Configuração", open_config),
-    pystray.MenuItem("Abrir pasta de entrada", open_input_folder),
-    pystray.MenuItem("Abrir logs", open_logs),
-    pystray.Menu.SEPARATOR,
-    pystray.MenuItem(
-        "Iniciar importador",
-        start_importer,
-        enabled=lambda item: not importer_running()
-    ),
-    pystray.MenuItem(
-        "Parar importador",
-        stop_importer,
-        enabled=lambda item: importer_running()
-    ),
-    pystray.MenuItem("Reiniciar importador", restart_importer),
-    pystray.Menu.SEPARATOR,
-    pystray.MenuItem("Sair", quit_all),
+        pystray.MenuItem("Status", show_status, default=True),
+        pystray.MenuItem("Configuração", open_config),
+        pystray.MenuItem("Abrir SEFAZ Downloader (Manual)", open_sefaz_manual),
+        pystray.MenuItem("Abrir pasta de entrada", open_input_folder),
+        pystray.MenuItem("Abrir logs", open_logs),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Iniciar importador", start_importer, enabled=lambda item: not importer_running()),
+        pystray.MenuItem("Parar importador", stop_importer, enabled=lambda item: importer_running()),
+        pystray.MenuItem("Reiniciar importador", restart_importer),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Sair", quit_all),
     )
+
     icon = pystray.Icon(APP_NAME, make_icon((30, 64, 175)), f"{APP_NAME} - TRAY", menu)
 
-    # auto-start (do jeito estável que funcionou)
+    # auto-start (modo estável)
     try:
         start_importer(icon)
     except Exception:
