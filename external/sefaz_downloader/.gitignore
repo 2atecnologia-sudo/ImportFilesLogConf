@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Banco de dados
+database/*.db
+
+# Logs
+logs/*.log
+
+# VS Code
+.vscode/
+
+# Build
+build/
+dist/
+
+# Windows
+Thumbs.db

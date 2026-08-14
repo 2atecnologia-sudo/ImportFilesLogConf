@@ -1,0 +1,4 @@
+class Version:
+
+    VERSAO = "1.0.0"
+    BUILD = "2026-08-03"
