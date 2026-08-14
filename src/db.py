@@ -35,8 +35,30 @@ def get_connection(sql_cfg: SqlSettings):
     return pyodbc.connect(build_conn_str(sql_cfg), autocommit=False)
 
 
+def _to_int_or_raise(value) -> int:
+    """
+    NumNF no SQL é numeric. Aqui garantimos que vai como int.
+    Se não for possível converter, levantamos erro para não gravar lixo.
+    """
+    s = str(value).strip()
+    if s == "":
+        raise ValueError("NumNF vazio.")
+    return int(s)
+
+
 def numdoc_exists(conn, num_doc: str) -> bool:
     cur = conn.cursor()
+
+    # checa cabeçalho (logConf) primeiro
+    try:
+        num_nf_db = _to_int_or_raise(num_doc)
+        cur.execute("SELECT TOP 1 1 FROM dbo.logConf WHERE NumNF = ?", (num_nf_db,))
+        if cur.fetchone() is not None:
+            return True
+    except Exception:
+        pass
+
+    # fallback: checa detalhe (prodConf)
     cur.execute("SELECT TOP 1 1 FROM dbo.prodConf WHERE NumDoc = ?", (str(num_doc),))
     return cur.fetchone() is not None
 
@@ -55,9 +77,33 @@ def prodconf_has_column(conn, column_name: str) -> bool:
     return cur.fetchone() is not None
 
 
+def insert_logconf_header(conn, num_nf: str, nome_cli: str, status_conf: str = "AGUARDANDO"):
+    """
+    Insere 1 linha em dbo.logConf com (NumNF, NomeCli, StatusConf).
+    Se já existir, não faz nada.
+    Não faz COMMIT aqui (commit é feito no final junto com prodConf).
+    """
+    cur = conn.cursor()
+
+    num_nf_db = _to_int_or_raise(num_nf)
+
+    # ignora duplicidade
+    cur.execute("SELECT TOP 1 1 FROM dbo.logConf WHERE NumNF = ?", (num_nf_db,))
+    if cur.fetchone() is not None:
+        return
+
+    sql = """
+    INSERT INTO dbo.logConf (NumNF, NomeCli, StatusConf)
+    VALUES (?, ?, ?)
+    """
+    cur.execute(sql, (num_nf_db, str(nome_cli)[:80], status_conf))
+
+
 def insert_prodconf_items(conn, num_doc: str, nome_cli: str, itens: list[dict], status_inicial: str):
     """
-    Insere itens na dbo.prodConf.
+    Insere cabeçalho em dbo.logConf (NumNF, NomeCli, StatusConf="AGUARDANDO")
+    e itens em dbo.prodConf.
+
     Cada item deve ter:
       CodProd, GTIN, DescProd, QtdeDoc
     E opcionalmente:
@@ -68,6 +114,10 @@ def insert_prodconf_items(conn, num_doc: str, nome_cli: str, itens: list[dict], 
     data_imp = date.today()
     data_hora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # >>> Cabeçalho (logConf)
+    insert_logconf_header(conn, num_doc, nome_cli, status_conf="AGUARDANDO")
+
+    # >>> Detalhe (prodConf)
     if has_nitem:
         sql = """
         INSERT INTO dbo.prodConf
