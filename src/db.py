@@ -7,6 +7,11 @@ import pyodbc
 from .settings import SqlSettings
 
 
+class DuplicateDocumentError(Exception):
+    """Documento já importado ou bloqueado por UNIQUE/CONSTRAINT."""
+    pass
+
+
 def build_conn_str(sql_cfg: SqlSettings) -> str:
     driver = sql_cfg.driver
     server = sql_cfg.server
@@ -36,10 +41,6 @@ def get_connection(sql_cfg: SqlSettings):
 
 
 def _to_int_or_raise(value) -> int:
-    """
-    NumNF no SQL é numeric. Aqui garantimos que vai como int.
-    Se não for possível converter, levantamos erro para não gravar lixo.
-    """
     s = str(value).strip()
     if s == "":
         raise ValueError("NumNF vazio.")
@@ -47,9 +48,10 @@ def _to_int_or_raise(value) -> int:
 
 
 def numdoc_exists(conn, num_doc: str) -> bool:
+    """Considera importado se já existe qualquer item no prodConf OU cabeçalho no logConf."""
     cur = conn.cursor()
 
-    # checa cabeçalho (logConf) primeiro
+    # 1) logConf
     try:
         num_nf_db = _to_int_or_raise(num_doc)
         cur.execute("SELECT TOP 1 1 FROM dbo.logConf WHERE NumNF = ?", (num_nf_db,))
@@ -58,7 +60,7 @@ def numdoc_exists(conn, num_doc: str) -> bool:
     except Exception:
         pass
 
-    # fallback: checa detalhe (prodConf)
+    # 2) prodConf
     cur.execute("SELECT TOP 1 1 FROM dbo.prodConf WHERE NumDoc = ?", (str(num_doc),))
     return cur.fetchone() is not None
 
@@ -77,53 +79,60 @@ def prodconf_has_column(conn, column_name: str) -> bool:
     return cur.fetchone() is not None
 
 
-def insert_logconf_header(conn, num_nf: str, nome_cli: str, status_conf: str = "AGUARDANDO"):
+def ensure_logconf_header(conn, num_nf: str, nome_cli: str, status_conf: str = "AGUARDANDO"):
     """
-    Insere 1 linha em dbo.logConf com (NumNF, NomeCli, StatusConf).
-    Se já existir, não faz nada.
-    Não faz COMMIT aqui (commit é feito no final junto com prodConf).
+    Garante 1 linha no logConf (não duplica).
+    NÃO dá commit aqui.
     """
     cur = conn.cursor()
-
     num_nf_db = _to_int_or_raise(num_nf)
 
-    # ignora duplicidade
     cur.execute("SELECT TOP 1 1 FROM dbo.logConf WHERE NumNF = ?", (num_nf_db,))
     if cur.fetchone() is not None:
         return
 
-    sql = """
-    INSERT INTO dbo.logConf (NumNF, NomeCli, StatusConf)
-    VALUES (?, ?, ?)
-    """
-    cur.execute(sql, (num_nf_db, str(nome_cli)[:80], status_conf))
+    cur.execute(
+        "INSERT INTO dbo.logConf (NumNF, NomeCli, StatusConf) VALUES (?, ?, ?)",
+        (num_nf_db, str(nome_cli)[:80], status_conf),
+    )
 
 
 def insert_prodconf_items(conn, num_doc: str, nome_cli: str, itens: list[dict], status_inicial: str):
     """
-    Insere cabeçalho em dbo.logConf (NumNF, NomeCli, StatusConf="AGUARDANDO")
-    e itens em dbo.prodConf.
-
-    Cada item deve ter:
-      CodProd, GTIN, DescProd, QtdeDoc
-    E opcionalmente:
-      NItem (int)  -> só será gravado se a coluna existir no banco
+    Insere em prodConf e garante cabeçalho no logConf.
     """
     has_nitem = prodconf_has_column(conn, "NItem")
+    has_localizacao = prodconf_has_column(conn, "Localizacao")
 
     data_imp = date.today()
     data_hora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # >>> Cabeçalho (logConf)
-    insert_logconf_header(conn, num_doc, nome_cli, status_conf="AGUARDANDO")
+    if numdoc_exists(conn, num_doc):
+        conn.rollback()
+        raise DuplicateDocumentError(f"NumDoc {num_doc} já importado.")
 
-    # >>> Detalhe (prodConf)
-    if has_nitem:
+    ensure_logconf_header(conn, num_doc, nome_cli, status_conf="AGUARDANDO")
+
+    if has_nitem and has_localizacao:
+        sql = """
+        INSERT INTO dbo.prodConf
+          (NumDoc, NomeCli, DataImp, NItem, CodProd, GTIN, DescProd, QtdeDoc, QtdeLido, Status, DataeHora, Localizacao)
+        VALUES
+          (?,      ?,       ?,     ?,     ?,       ?,    ?,        ?,       ?,        ?,      ?,        ?)
+        """
+    elif has_nitem and not has_localizacao:
         sql = """
         INSERT INTO dbo.prodConf
           (NumDoc, NomeCli, DataImp, NItem, CodProd, GTIN, DescProd, QtdeDoc, QtdeLido, Status, DataeHora)
         VALUES
           (?,      ?,       ?,     ?,     ?,       ?,    ?,        ?,       ?,        ?,      ?)
+        """
+    elif (not has_nitem) and has_localizacao:
+        sql = """
+        INSERT INTO dbo.prodConf
+          (NumDoc, NomeCli, DataImp, CodProd, GTIN, DescProd, QtdeDoc, QtdeLido, Status, DataeHora, Localizacao)
+        VALUES
+          (?,      ?,       ?,     ?,       ?,    ?,        ?,       ?,        ?,      ?,        ?)
         """
     else:
         sql = """
@@ -134,40 +143,80 @@ def insert_prodconf_items(conn, num_doc: str, nome_cli: str, itens: list[dict], 
         """
 
     cur = conn.cursor()
-    for it in itens:
-        codprod = str(it.get("CodProd", ""))[:50]
-        gtin = int(it.get("GTIN", 0) or 0)
-        desc = str(it.get("DescProd", ""))[:50]
-        qtde = Decimal(str(it.get("QtdeDoc", "0")))
-        qtde_lido = Decimal("0")
+    try:
+        for it in itens:
+            codprod = str(it.get("CodProd", ""))[:50]
+            gtin = int(it.get("GTIN", 0) or 0)
+            desc = str(it.get("DescProd", ""))[:50]
+            qtde = Decimal(str(it.get("QtdeDoc", "0")))
+            qtde_lido = Decimal("0")
 
-        if has_nitem:
-            nitem = it.get("NItem", None)
-            cur.execute(sql, (
-                str(num_doc)[:50],
-                str(nome_cli)[:50],
-                data_imp,
-                nitem,
-                codprod,
-                gtin,
-                desc,
-                qtde,
-                qtde_lido,
-                str(status_inicial)[:3],
-                str(data_hora)[:50],
-            ))
-        else:
-            cur.execute(sql, (
-                str(num_doc)[:50],
-                str(nome_cli)[:50],
-                data_imp,
-                codprod,
-                gtin,
-                desc,
-                qtde,
-                qtde_lido,
-                str(status_inicial)[:3],
-                str(data_hora)[:50],
-            ))
+            localizacao = (it.get("Localizacao", "") or "")[:50]  # pode ser vazio
 
-    conn.commit()
+            if has_nitem:
+                nitem = it.get("NItem", None)
+                if has_localizacao:
+                    cur.execute(sql, (
+                        str(num_doc)[:50],
+                        str(nome_cli)[:50],
+                        data_imp,
+                        nitem,
+                        codprod,
+                        gtin,
+                        desc,
+                        qtde,
+                        qtde_lido,
+                        str(status_inicial)[:4],
+                        str(data_hora)[:50],
+                        localizacao,
+                    ))
+                else:
+                    cur.execute(sql, (
+                        str(num_doc)[:50],
+                        str(nome_cli)[:50],
+                        data_imp,
+                        nitem,
+                        codprod,
+                        gtin,
+                        desc,
+                        qtde,
+                        qtde_lido,
+                        str(status_inicial)[:4],
+                        str(data_hora)[:50],
+                    ))
+            else:
+                if has_localizacao:
+                    cur.execute(sql, (
+                        str(num_doc)[:50],
+                        str(nome_cli)[:50],
+                        data_imp,
+                        codprod,
+                        gtin,
+                        desc,
+                        qtde,
+                        qtde_lido,
+                        str(status_inicial)[:4],
+                        str(data_hora)[:50],
+                        localizacao,
+                    ))
+                else:
+                    cur.execute(sql, (
+                        str(num_doc)[:50],
+                        str(nome_cli)[:50],
+                        data_imp,
+                        codprod,
+                        gtin,
+                        desc,
+                        qtde,
+                        qtde_lido,
+                        str(status_inicial)[:4],
+                        str(data_hora)[:50],
+                    ))
+
+        conn.commit()
+
+    except pyodbc.IntegrityError:
+        conn.rollback()
+        raise DuplicateDocumentError(
+            f"Falha de integridade ao inserir NumDoc {num_doc} (verifique UNIQUE/CONSTRAINT)."
+        )

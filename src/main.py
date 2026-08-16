@@ -15,6 +15,10 @@ from .parser_xml import parse_nfe_xml
 from .parser_txt import parse_txt_documents
 
 
+# Pasta extra para guardar cópia quando importar com sucesso
+MIS_DIR = os.path.normpath(r"C:\mis")
+
+
 def ensure_dirs(*dirs: str):
     for d in dirs:
         if d:
@@ -57,6 +61,10 @@ def wait_file_stable(path: str, checks: int = 3, interval_sec: float = 1.0) -> b
 
 
 def safe_move(src: str, dst_dir: str) -> str:
+    """
+    Move para dst_dir. Se já existir no destino, renomeia com timestamp
+    para não sobrescrever.
+    """
     ensure_dirs(dst_dir)
     base = os.path.basename(src)
     dst = os.path.join(dst_dir, base)
@@ -69,6 +77,87 @@ def safe_move(src: str, dst_dir: str) -> str:
     shutil.move(src, dst)
     return dst
 
+
+# -------- LOCK (evita processar o mesmo arquivo duas vezes) --------
+
+def _lock_path_for(file_path: str) -> str:
+    return file_path + ".processing"
+
+
+def acquire_file_lock(file_path: str) -> str | None:
+    """
+    Cria um lock file atomicamente. Se já existir, alguém já está processando.
+    Retorna o caminho do lock se conseguiu, senão None.
+    """
+    lock_path = _lock_path_for(file_path)
+
+    # se o lock existe mas o arquivo não existe mais, limpa lock órfão
+    if os.path.exists(lock_path) and not os.path.exists(file_path):
+        try:
+            os.remove(lock_path)
+        except Exception:
+            pass
+
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            os.write(fd, f"pid={os.getpid()} time={time.time()}".encode("utf-8"))
+        finally:
+            os.close(fd)
+        return lock_path
+    except FileExistsError:
+        return None
+
+
+def release_file_lock(lock_path: str | None):
+    if not lock_path:
+        return
+    try:
+        os.remove(lock_path)
+    except Exception:
+        pass
+
+
+# -------- CÓPIA PARA MIS --------
+
+def copy_to_mis_keep_original_name(src_path: str) -> str:
+    """
+    Copia para C:\\mis mantendo o MESMO nome do arquivo de origem.
+    Se já existir em C:\\mis, SOBRESCREVE (não renomeia).
+    """
+    ensure_dirs(MIS_DIR)
+
+    # retry curto (para casos raros do evento chegar cedo)
+    for _ in range(10):
+        if os.path.exists(src_path):
+            break
+        time.sleep(0.1)
+
+    if not os.path.exists(src_path):
+        raise FileNotFoundError(f"Arquivo não encontrado para copiar: {src_path}")
+
+    base = os.path.basename(src_path)
+    dst = os.path.join(MIS_DIR, base)
+
+    shutil.copy2(src_path, dst)  # sobrescreve se já existir
+    return dst
+
+
+def copy_to_mis_then_move_to_processed(original_path: str, settings) -> str:
+    """
+    1) Copia para C:\\mis usando o nome ORIGINAL (antes de qualquer renomeio).
+    2) Move para processados (podendo renomear lá se já existir).
+    """
+    mis_path = copy_to_mis_keep_original_name(original_path)
+    logging.info(f"[MIS] Cópia criada/atualizada: {mis_path}")
+
+    moved_path = safe_move(original_path, settings.watch.processed_dir)
+    logging.info(f"Movido para PROCESSADOS: {moved_path}")
+
+    return moved_path
+
+
+# -------- PROCESSAMENTO --------
 
 def process_xml(file_path: str, settings):
     doc = parse_nfe_xml(file_path, group_items=settings.app.group_items)
@@ -86,7 +175,8 @@ def process_xml(file_path: str, settings):
 
         insert_prodconf_items(conn, numdoc, nomecli, itens, settings.app.status_inicial)
         conn.close()
-        safe_move(file_path, settings.watch.processed_dir)
+
+        copy_to_mis_then_move_to_processed(file_path, settings)
         logging.info(f"[XML] Importado OK: NumDoc={numdoc} Itens={len(itens)}")
 
     except Exception:
@@ -94,7 +184,10 @@ def process_xml(file_path: str, settings):
             conn.rollback()
         except Exception:
             pass
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
         raise
 
 
@@ -111,7 +204,6 @@ def process_txt(file_path: str, settings):
         raise ValueError("TXT sem registros válidos.")
 
     conn = get_connection(settings.sql)
-
     imported = 0
     skipped_dup = 0
 
@@ -135,9 +227,8 @@ def process_txt(file_path: str, settings):
         conn.close()
 
         if imported > 0:
-            safe_move(file_path, settings.watch.processed_dir)
+            copy_to_mis_then_move_to_processed(file_path, settings)
         else:
-            # se não importou nada e só pulou por duplicidade, manda pra duplicados
             if skipped_dup > 0:
                 safe_move(file_path, settings.watch.duplicate_dir)
             else:
@@ -148,7 +239,10 @@ def process_txt(file_path: str, settings):
             conn.rollback()
         except Exception:
             pass
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
         raise
 
 
@@ -161,15 +255,24 @@ def process_file(file_path: str, settings):
     if fmt == "txt" and ext != ".txt":
         return
 
-    logging.info(f"Detectado arquivo: {file_path}")
+    # LOCK: evita processar o mesmo arquivo duas vezes
+    lock_path = acquire_file_lock(file_path)
+    if not lock_path:
+        logging.info(f"Ignorando (já em processamento): {file_path}")
+        return
 
-    if not wait_file_stable(file_path):
-        raise RuntimeError("Arquivo não estabilizou (cópia incompleta?).")
+    try:
+        logging.info(f"Detectado arquivo: {file_path}")
 
-    if fmt == "xml":
-        process_xml(file_path, settings)
-    else:
-        process_txt(file_path, settings)
+        if not wait_file_stable(file_path):
+            raise RuntimeError("Arquivo não estabilizou (cópia incompleta?).")
+
+        if fmt == "xml":
+            process_xml(file_path, settings)
+        else:
+            process_txt(file_path, settings)
+    finally:
+        release_file_lock(lock_path)
 
 
 class Handler(FileSystemEventHandler):
@@ -219,7 +322,6 @@ def process_existing(settings):
 
 def main():
     settings = load_settings()
-
     setup_logging(settings.logging.log_dir, settings.logging.level)
 
     ensure_dirs(
@@ -228,11 +330,14 @@ def main():
         settings.watch.error_dir,
         settings.watch.duplicate_dir,
         settings.logging.log_dir,
+        MIS_DIR,
     )
 
-    logging.info(f"Iniciando importador | formato={settings.app.input_format} | pasta={settings.watch.input_dir}")
+    logging.info(
+        f"Iniciando importador | formato={settings.app.input_format} | pasta={settings.watch.input_dir}"
+    )
+    logging.info(f"Pasta MIS (cópia em sucesso): {MIS_DIR}")
 
-    # processa o que já estiver na pasta
     process_existing(settings)
 
     handler = Handler(settings)

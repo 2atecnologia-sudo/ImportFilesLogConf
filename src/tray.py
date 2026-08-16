@@ -10,11 +10,23 @@ from PIL import Image
 
 APP_NAME = "ImportFilesLogConf"
 APP_VERSION = "1.0.0"
-APP_COMPANY = "SUA_EMPRESA_AQUI"
-APP_CONTACT = "suporte@seudominio.com"
+APP_COMPANY = "2A Tecnologia"
+APP_CONTACT = "faleconosco@2atecnologia.com.br"
 
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
+def is_frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def get_base_dir() -> str:
+    # Empacotado: pasta do exe
+    if is_frozen():
+        return os.path.dirname(sys.executable)
+    # Dev: raiz do projeto
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+BASE_DIR = get_base_dir()
 _importer_proc = None  # subprocess.Popen | None
 
 
@@ -63,11 +75,27 @@ def start_importer(icon, item=None):
     if os.name == "nt":
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
-    _importer_proc = subprocess.Popen(
-        [sys.executable, "-m", "src.main"],
-        cwd=BASE_DIR,
-        creationflags=creationflags,
-    )
+    importer_exe = os.path.join(BASE_DIR, "ImportFilesLogConfImporter.exe")
+
+    if is_frozen():
+        # Modo empacotado: NUNCA chamar python -m (evita loop de ícones)
+        if not os.path.exists(importer_exe):
+            _msg_error(APP_NAME, f"Importer não encontrado:\n{importer_exe}")
+            refresh(icon)
+            return
+
+        _importer_proc = subprocess.Popen(
+            [importer_exe],
+            cwd=BASE_DIR,
+            creationflags=creationflags,
+        )
+    else:
+        # Modo desenvolvimento
+        _importer_proc = subprocess.Popen(
+            [sys.executable, "-m", "src.importer_entry"],
+            cwd=BASE_DIR,
+            creationflags=creationflags,
+        )
 
     time.sleep(0.7)
     refresh(icon)
@@ -96,10 +124,24 @@ def restart_importer(icon, item=None):
 
 
 def open_config(icon, item=None):
+    if is_frozen():
+        cfg_exe = os.path.join(BASE_DIR, "ImportFilesLogConfConfig.exe")
+        if not os.path.exists(cfg_exe):
+            _msg_error(APP_NAME, f"Config UI não encontrada:\n{cfg_exe}")
+            return
+        subprocess.Popen([cfg_exe], cwd=BASE_DIR)
+        return
+
     subprocess.Popen([sys.executable, "-m", "src.config_ui"], cwd=BASE_DIR)
 
 
 def open_logs(icon, item=None):
+    if is_frozen():
+        log_dir = os.path.join(BASE_DIR, "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        os.startfile(log_dir)
+        return
+
     from .settings import load_settings
     s = load_settings()
     os.makedirs(s.logging.log_dir, exist_ok=True)
@@ -107,6 +149,10 @@ def open_logs(icon, item=None):
 
 
 def open_input_folder(icon, item=None):
+    if is_frozen():
+        _msg_info(APP_NAME, "Abra a pasta configurada no config.ini (watch.input_dir).")
+        return
+
     from .settings import load_settings
     s = load_settings()
     os.makedirs(s.watch.input_dir, exist_ok=True)
@@ -114,6 +160,16 @@ def open_input_folder(icon, item=None):
 
 
 def show_status(icon, item=None):
+    if is_frozen():
+        msg = (
+            f"{APP_NAME}\n\n"
+            f"Importador: {'RODANDO' if importer_running() else 'PARADO'}\n\n"
+            f"Base: {BASE_DIR}\n"
+            f"Obs: em modo empacotado, leia config.ini na pasta do programa.\n"
+        )
+        _msg_info(APP_NAME, msg)
+        return
+
     from .settings import load_settings
     s = load_settings()
 
@@ -136,11 +192,20 @@ def show_about(icon, item=None):
     )
     _msg_info("Sobre", about)
 
-
 def open_sefaz_manual(icon, item=None):
     """
     Abre a interface do SEFAZ Downloader em modo manual.
+    - Empacotado: abre SefazDownloader.exe (na mesma pasta do Tray)
+    - Dev: abre external/sefaz_downloader/main.py
     """
+    if is_frozen():
+        sefaz_exe = os.path.join(BASE_DIR, "SefazDownloader.exe")
+        if not os.path.exists(sefaz_exe):
+            _msg_error(APP_NAME, f"SefazDownloader.exe não encontrado:\n{sefaz_exe}")
+            return
+        subprocess.Popen([sefaz_exe], cwd=BASE_DIR)
+        return
+
     sefaz_dir = os.path.join(BASE_DIR, "external", "sefaz_downloader")
     main_py = os.path.join(sefaz_dir, "main.py")
 
@@ -184,7 +249,7 @@ def run_tray():
 
     icon = pystray.Icon(APP_NAME, make_icon((30, 64, 175)), f"{APP_NAME} - TRAY", menu)
 
-    # auto-start (modo estável)
+    # auto-start
     try:
         start_importer(icon)
     except Exception:
