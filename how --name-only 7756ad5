@@ -1,0 +1,10 @@
+[33m7756ad5[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mfeature/unir-sefaz-importador[m[33m, [m[1;31morigin/feature/unir-sefaz-importador[m[33m)[m Unifica aplicações e atualiza importador/tray
+[33m3a3ca58[m Suporta Localizacao no TXT e ajustes no importador
+[33me282b36[m feat: adiciona menu Sobre no tray
+[33m563545d[m feat: tray abre sefaz downloader em modo manual
+[33mab2dae7[m chore: traz sefaz_downloader para o repo e atualiza dependencias
+[33mb488144[m chore: adiciona sefaz_downloader em external e atualiza requirements
+[33m4d1a08c[m[33m ([m[1;33mtag: [m[1;33mv1-importer-estavel[m[33m, [m[1;32mmain[m[33m)[m feat: grava cabecalho em logConf ao importar (AGUARDANDO)
+[33m0406a24[m[33m ([m[1;31morigin/main[m[33m)[m chore: ignora arquivos .bat
+[33m24e0839[m docs: resumo do projeto e tray atualizado
+[33m45ba6b8[m feat: importador txt/xml com config.ini, parser e main

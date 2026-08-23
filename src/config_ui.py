@@ -1,13 +1,29 @@
 import os
 import shutil
 import configparser
+import subprocess
+import sys
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 import pyodbc
+from PIL import Image, ImageTk
 
-CONFIG_PATH = "config.ini"
-EXAMPLE_PATH = "config.ini.example"
+from .runtime_status import read_runtime_status
+
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
+EXAMPLE_PATH = os.path.join(BASE_DIR, "config.ini.example")
+
+
+def resource_path(relative_path: str) -> str:
+    """Retorna o caminho de um recurso tanto em desenvolvimento quanto no PyInstaller."""
+    base = getattr(sys, "_MEIPASS", BASE_DIR)
+    return os.path.join(base, relative_path)
 
 
 def ensure_config_exists():
@@ -69,11 +85,14 @@ def build_conn_str(cfg: configparser.ConfigParser) -> str:
 
 
 class ConfigUI(tk.Tk):
-    def __init__(self):
+    def __init__(self, initial_tab="config"):
         super().__init__()
-        self.title("Configuração - Importador (XML/TXT)")
-        self.geometry("820x560")
-        self.resizable(False, False)
+        self.title("ImportFiles LogConf")
+        self.geometry("900x650")
+        self.minsize(900, 650)
+        self.resizable(True, True)
+
+        self.initial_tab = initial_tab
 
         self.cfg = load_cfg()
 
@@ -83,20 +102,29 @@ class ConfigUI(tk.Tk):
         self._build()
         self._load_to_form()
         self._apply_states()
+        self._select_initial_tab()
+
+        # Atualiza a aba de Status/Logs periodicamente enquanto a janela estiver aberta.
+        self.after(300, self._status_auto_refresh)
 
     def _build(self):
-        nb = ttk.Notebook(self)
-        nb.pack(fill="both", expand=True, padx=10, pady=10)
+        self.nb = ttk.Notebook(self)
+        self.nb.pack(fill="both", expand=True, padx=10, pady=10)
 
-        tab_sql = ttk.Frame(nb)
-        tab_paths = ttk.Frame(nb)
-        tab_input = ttk.Frame(nb)
-        tab_app = ttk.Frame(nb)
+        tab_sql = ttk.Frame(self.nb)
+        tab_paths = ttk.Frame(self.nb)
+        tab_input = ttk.Frame(self.nb)
+        tab_app = ttk.Frame(self.nb)
+        self.tab_status = ttk.Frame(self.nb)
 
-        nb.add(tab_sql, text="SQL Server")
-        nb.add(tab_paths, text="Pastas")
-        nb.add(tab_input, text="Entrada (XML/TXT)")
-        nb.add(tab_app, text="Aplicação")
+        self.nb.add(tab_sql, text="SQL Server")
+        self.nb.add(tab_paths, text="Pastas")
+        self.nb.add(tab_input, text="Entrada (XML/TXT)")
+        self.nb.add(tab_app, text="Aplicação")
+        self.nb.add(self.tab_status, text="Status / Logs")
+
+        self.tab_about = ttk.Frame(self.nb)
+        self.nb.add(self.tab_about, text="Sobre")
 
         # ---- SQL
         fs = ttk.LabelFrame(tab_sql, text="Conexão")
@@ -171,12 +199,382 @@ class ConfigUI(tk.Tk):
         chk_group.grid(row=1, column=0, columnspan=3, sticky="w", padx=8, pady=8)
         self.widgets["app.group_items"] = chk_group
 
+        # ---- Status / Logs
+        self._build_status_tab()
+
+        # ---- Sobre
+        self._build_about_tab()
+
         # ---- Bottom
         bottom = ttk.Frame(self)
         bottom.pack(fill="x", padx=10, pady=(0, 10))
 
         ttk.Button(bottom, text="Salvar", command=self._save).pack(side="right")
         ttk.Button(bottom, text="Fechar", command=self.destroy).pack(side="right", padx=(0, 8))
+
+
+    def _build_status_tab(self):
+        top = ttk.LabelFrame(self.tab_status, text="Status do sistema")
+        top.pack(fill="x", padx=10, pady=(10, 6))
+
+        self.status_vars = {
+            "importer": tk.StringVar(value="Verificando..."),
+            "sql": tk.StringVar(value="Verificando..."),
+            "pending": tk.StringVar(value="0"),
+            "updated": tk.StringVar(value="-"),
+            "result": tk.StringVar(value="-"),
+        }
+
+        labels = [
+            ("Importador", "importer"),
+            ("SQL Server", "sql"),
+            ("Arquivos pendentes", "pending"),
+            ("Última atualização", "updated"),
+            ("Último resultado", "result"),
+        ]
+
+        for row, (label, key) in enumerate(labels):
+            ttk.Label(top, text=f"{label}:").grid(
+                row=row, column=0, sticky="w", padx=(10, 6), pady=4
+            )
+            ttk.Label(top, textvariable=self.status_vars[key]).grid(
+                row=row, column=1, sticky="w", padx=(0, 10), pady=4
+            )
+
+        top.grid_columnconfigure(1, weight=1)
+
+        info = ttk.LabelFrame(self.tab_status, text="Ambiente")
+        info.pack(fill="x", padx=10, pady=6)
+
+        self.status_env = tk.StringVar(value="")
+        ttk.Label(
+            info,
+            textvariable=self.status_env,
+            justify="left",
+        ).pack(anchor="w", padx=10, pady=8)
+
+        logs = ttk.LabelFrame(self.tab_status, text="Eventos recentes")
+        logs.pack(fill="both", expand=True, padx=10, pady=6)
+
+        self.log_text = tk.Text(
+            logs,
+            wrap="none",
+            height=16,
+            state="disabled",
+            font=("Consolas", 9),
+        )
+        yscroll = ttk.Scrollbar(logs, orient="vertical", command=self.log_text.yview)
+        xscroll = ttk.Scrollbar(logs, orient="horizontal", command=self.log_text.xview)
+        self.log_text.configure(
+            yscrollcommand=yscroll.set,
+            xscrollcommand=xscroll.set,
+        )
+
+        self.log_text.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        logs.grid_rowconfigure(0, weight=1)
+        logs.grid_columnconfigure(0, weight=1)
+
+        actions = ttk.Frame(self.tab_status)
+        actions.pack(fill="x", padx=10, pady=(0, 10))
+
+        ttk.Button(
+            actions,
+            text="Atualizar",
+            command=self._refresh_status_tab,
+        ).pack(side="left")
+
+        ttk.Button(
+            actions,
+            text="Abrir pasta de logs",
+            command=self._open_log_dir,
+        ).pack(side="left", padx=(8, 0))
+
+    def _build_about_tab(self):
+        container = ttk.Frame(self.tab_about, padding=28)
+        container.pack(fill="both", expand=True)
+
+        content = ttk.Frame(container)
+        content.pack(anchor="nw", fill="x", padx=12, pady=10)
+
+        # Logo menor no canto superior esquerdo.
+        try:
+            logo_path = resource_path(os.path.join("assets", "logo_2a.png"))
+            image = Image.open(logo_path)
+            image.thumbnail((210, 54), Image.LANCZOS)
+            self._about_logo = ImageTk.PhotoImage(image)
+
+            ttk.Label(
+                content,
+                image=self._about_logo,
+            ).pack(anchor="w", pady=(0, 24))
+        except Exception:
+            ttk.Label(
+                content,
+                text="2A Tecnologia",
+                font=("Segoe UI", 16),
+            ).pack(anchor="w", pady=(0, 24))
+
+        # Produto + versão na mesma linha, sem negrito e em tamanho discreto.
+        title_row = ttk.Frame(content)
+        title_row.pack(anchor="w", fill="x")
+
+        ttk.Label(
+            title_row,
+            text="ImportFiles LogConf",
+            font=("Segoe UI", 13),
+        ).pack(side="left")
+
+        ttk.Label(
+            title_row,
+            text="   |   ",
+            font=("Segoe UI", 11),
+        ).pack(side="left")
+
+        ttk.Label(
+            title_row,
+            text="Versão 1.0.0",
+            font=("Segoe UI", 11),
+        ).pack(side="left")
+
+        ttk.Separator(content, orient="horizontal").pack(
+            fill="x", pady=(16, 20)
+        )
+
+        ttk.Label(
+            content,
+            text=(
+                "Sistema para integração de dados de conferência para processos de\n"
+                "recebimento, expedição e separação de mercadorias."
+            ),
+            justify="left",
+            font=("Segoe UI", 11),
+        ).pack(anchor="w", pady=(0, 20))
+
+        ttk.Separator(content, orient="horizontal").pack(
+            fill="x", pady=(0, 20)
+        )
+
+        ttk.Label(
+            content,
+            text="Desenvolvido por 2A Tecnologia",
+            font=("Segoe UI", 11),
+        ).pack(anchor="w", pady=(0, 14))
+
+        contacts = ttk.Frame(content)
+        contacts.pack(anchor="w", pady=(0, 18))
+
+        self._about_contact_icons = []
+
+        contact_rows = [
+            ("whatsapp.png", "Telefone / WhatsApp:", "(11) 95246-9907"),
+            ("email.png", "E-mail:", "faleconosco@2atecnologia.com.br"),
+            ("site.png", "Site:", "2atec.com.br"),
+        ]
+
+        for row, (icon_name, label_text, value_text) in enumerate(contact_rows):
+            try:
+                icon_path = resource_path(os.path.join("assets", icon_name))
+                icon_img = Image.open(icon_path)
+                icon_img.thumbnail((22, 22), Image.LANCZOS)
+                icon_photo = ImageTk.PhotoImage(icon_img)
+                self._about_contact_icons.append(icon_photo)
+
+                ttk.Label(
+                    contacts,
+                    image=icon_photo,
+                ).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=7)
+            except Exception:
+                ttk.Label(
+                    contacts,
+                    text="",
+                    width=3,
+                ).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=7)
+
+            ttk.Label(
+                contacts,
+                text=label_text,
+                font=("Segoe UI", 10, "bold"),
+            ).grid(row=row, column=1, sticky="w", padx=(0, 12), pady=7)
+
+            ttk.Label(
+                contacts,
+                text=value_text,
+                font=("Segoe UI", 10),
+            ).grid(row=row, column=2, sticky="w", pady=7)
+
+        ttk.Separator(content, orient="horizontal").pack(
+            fill="x", pady=(0, 18)
+        )
+
+        ttk.Label(
+            content,
+            text="© 2026 2A Tecnologia\nTodos os direitos reservados.",
+            justify="left",
+            font=("Segoe UI", 9),
+        ).pack(anchor="w")
+
+    def _select_initial_tab(self):
+        if str(self.initial_tab).lower() == "status":
+            self.nb.select(self.tab_status)
+            self._refresh_status_tab()
+        else:
+            self.nb.select(0)
+
+    def _importer_rodando(self) -> bool:
+        if os.name != "nt":
+            return False
+
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq ImportFilesLogConfImporter.exe"],
+                capture_output=True,
+                text=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                timeout=3,
+            )
+            return "ImportFilesLogConfImporter.exe" in (result.stdout or "")
+        except Exception:
+            return False
+
+    def _count_pending_files(self) -> int:
+        try:
+            input_dir = self.cfg.get(
+                "watch",
+                "input_dir",
+                fallback=r"C:\MIS\entrada",
+            ).strip()
+
+            if not os.path.isdir(input_dir):
+                return 0
+
+            return sum(
+                1
+                for name in os.listdir(input_dir)
+                if os.path.isfile(os.path.join(input_dir, name))
+            )
+        except Exception:
+            return 0
+
+    def _get_log_path(self) -> str:
+        log_dir = self.cfg.get(
+            "logging",
+            "log_dir",
+            fallback=os.path.join(BASE_DIR, "logs"),
+        ).strip()
+        return os.path.join(log_dir, "importador.log")
+
+    def _read_recent_events(self, max_lines=120):
+        log_path = self._get_log_path()
+
+        if not os.path.isfile(log_path):
+            return ["Nenhum log encontrado ainda."]
+
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+
+            interesting = []
+            keywords = (
+                "[ARQUIVO]",
+                "[SYNC PENDENTE]",
+                "[SYNC PAR DETECTADO]",
+                "[SYNC][LOGCONF]",
+                "[SYNC][PRODCONF]",
+                "[SYNC VALIDACAO CONCLUIDA]",
+                "[SIMULACAO][LOGCONF]",
+                "[SIMULACAO][PRODCONF]",
+                "[PREFLIGHT OK]",
+                "[SYNC GRAVACAO OK]",
+                "[SYNC ARQUIVOS PROCESSADOS]",
+                "[SYNC][SQL PENDENTE]",
+                "[SYNC ABORTADA]",
+                "[REPROCESSAMENTO AUTOMATICO]",
+                "Iniciando importador",
+            )
+
+            for line in lines:
+                if any(k in line for k in keywords):
+                    interesting.append(line.rstrip())
+
+            return interesting[-max_lines:] or ["Nenhum evento relevante encontrado."]
+        except Exception as e:
+            return [f"Erro ao ler log: {e}"]
+
+    def _last_result_from_log(self) -> str:
+        lines = self._read_recent_events(max_lines=80)
+
+        for line in reversed(lines):
+            if "[SYNC GRAVACAO OK]" in line:
+                return "Processamento concluído com COMMIT OK"
+            if "[SYNC][SQL PENDENTE]" in line:
+                return "SQL indisponível - arquivos preservados"
+            if "[SYNC ABORTADA]" in line:
+                return "Sincronização abortada - verificar log"
+        return "-"
+
+    def _refresh_status_tab(self):
+        # Recarrega config para refletir qualquer alteração salva.
+        self.cfg = load_cfg()
+        runtime = read_runtime_status(BASE_DIR) or {}
+
+        importer_ok = self._importer_rodando()
+        estado = runtime.get("estado", "")
+
+        self.status_vars["importer"].set(
+            "RODANDO" if importer_ok else "PARADO"
+        )
+
+        if estado == "SQL_PENDENTE":
+            self.status_vars["sql"].set("INDISPONÍVEL")
+        elif estado == "OK":
+            self.status_vars["sql"].set("CONECTADO")
+        else:
+            self.status_vars["sql"].set("NÃO VERIFICADO")
+
+        self.status_vars["pending"].set(str(self._count_pending_files()))
+        self.status_vars["updated"].set(runtime.get("updated_at", "-") or "-")
+        self.status_vars["result"].set(self._last_result_from_log())
+
+        servidor = self.cfg.get("sql", "server", fallback="-")
+        banco = self.cfg.get("sql", "database", fallback="-")
+        formato = self.cfg.get("input", "format", fallback="-").upper()
+        entrada = self.cfg.get("watch", "input_dir", fallback="-")
+
+        self.status_env.set(
+            f"Servidor SQL: {servidor}\n"
+            f"Banco: {banco}\n"
+            f"Formato: {formato}\n"
+            f"Pasta monitorada: {entrada}"
+        )
+
+        events = self._read_recent_events()
+        self.log_text.configure(state="normal")
+        self.log_text.delete("1.0", "end")
+        self.log_text.insert("1.0", "\n".join(events))
+        self.log_text.see("end")
+        self.log_text.configure(state="disabled")
+
+    def _status_auto_refresh(self):
+        try:
+            if hasattr(self, "nb") and hasattr(self, "tab_status"):
+                if self.nb.select() == str(self.tab_status):
+                    self._refresh_status_tab()
+        finally:
+            if self.winfo_exists():
+                self.after(5000, self._status_auto_refresh)
+
+    def _open_log_dir(self):
+        log_dir = self.cfg.get(
+            "logging",
+            "log_dir",
+            fallback=os.path.join(BASE_DIR, "logs"),
+        ).strip()
+        os.makedirs(log_dir, exist_ok=True)
+
+        if os.name == "nt":
+            os.startfile(log_dir)
 
     def _entry(self, parent, label, key, row, show=None):
         self.vars[key] = tk.StringVar()
