@@ -113,7 +113,7 @@ def _buscar_prodconf(cur, reg, lock: bool = False):
 
     if ean and cod:
         sql = f"""
-            SELECT NumDoc, CodProd, GTIN, QtdeLido, Saldo, Status
+            SELECT NumDoc, CodProd, GTIN, QtdeLido, Saldo, Localizacao, Status
             FROM dbo.prodConf{hint}
             WHERE CAST(NumDoc AS VARCHAR(50)) = ?
               AND (
@@ -126,7 +126,7 @@ def _buscar_prodconf(cur, reg, lock: bool = False):
 
     elif cod:
         sql = f"""
-            SELECT NumDoc, CodProd, GTIN, QtdeLido, Saldo, Status
+            SELECT NumDoc, CodProd, GTIN, QtdeLido, Saldo, Localizacao, Status
             FROM dbo.prodConf{hint}
             WHERE CAST(NumDoc AS VARCHAR(50)) = ?
               AND LTRIM(RTRIM(ISNULL(CAST(CodProd AS VARCHAR(100)), ''))) = ?
@@ -140,7 +140,7 @@ def _buscar_prodconf(cur, reg, lock: bool = False):
             )
 
         sql = f"""
-            SELECT NumDoc, CodProd, GTIN, QtdeLido, Saldo, Status
+            SELECT NumDoc, CodProd, GTIN, QtdeLido, Saldo, Localizacao, Status
             FROM dbo.prodConf{hint}
             WHERE CAST(NumDoc AS VARCHAR(50)) = ?
               AND LTRIM(RTRIM(ISNULL(CAST(GTIN AS VARCHAR(100)), ''))) = ?
@@ -158,13 +158,14 @@ def _update_prodconf(cur, reg):
     valores = (
         _decimal_ou_none(reg.qtde_lido),
         _decimal_ou_none(reg.saldo),
+        _texto(reg.localizacao) or None,
         _texto(reg.status).upper(),
     )
 
     if ean and cod:
         sql = """
             UPDATE dbo.prodConf
-               SET QtdeLido = ?, Saldo = ?, Status = ?
+               SET QtdeLido = ?, Saldo = ?, Localizacao = ?, Status = ?
              WHERE CAST(NumDoc AS VARCHAR(50)) = ?
                AND (
                     LTRIM(RTRIM(ISNULL(CAST(CodProd AS VARCHAR(100)), ''))) = ?
@@ -177,7 +178,7 @@ def _update_prodconf(cur, reg):
     elif cod:
         sql = """
             UPDATE dbo.prodConf
-               SET QtdeLido = ?, Saldo = ?, Status = ?
+               SET QtdeLido = ?, Saldo = ?, Localizacao = ?, Status = ?
              WHERE CAST(NumDoc AS VARCHAR(50)) = ?
                AND LTRIM(RTRIM(ISNULL(CAST(CodProd AS VARCHAR(100)), ''))) = ?
         """
@@ -186,7 +187,7 @@ def _update_prodconf(cur, reg):
     else:
         sql = """
             UPDATE dbo.prodConf
-               SET QtdeLido = ?, Saldo = ?, Status = ?
+               SET QtdeLido = ?, Saldo = ?, Localizacao = ?, Status = ?
              WHERE CAST(NumDoc AS VARCHAR(50)) = ?
                AND LTRIM(RTRIM(ISNULL(CAST(GTIN AS VARCHAR(100)), ''))) = ?
         """
@@ -202,10 +203,6 @@ def _update_prodconf(cur, reg):
 
 
 def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf) -> ResultadoGravacao:
-    """
-    Atualiza LOGCONF + PRODCONF em uma única transação.
-    Qualquer falha executa ROLLBACK.
-    """
     conn = get_connection(settings.sql)
     resultado = ResultadoGravacao()
 
@@ -216,7 +213,6 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf) -> Re
         tipo_hora_ini = _tipo_coluna(conn, "dbo.logConf", "HoraIniConf")
         tipo_hora_fim = _tipo_coluna(conn, "dbo.logConf", "HoraFimConf")
 
-        # Preflight LOGCONF com lock
         for item in logconf:
             cur.execute(
                 """
@@ -233,7 +229,6 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf) -> Re
                     f"LOGCONF NumNF={item['num_nf']}: encontrados={len(rows)}; esperado=1."
                 )
 
-        # Preflight PRODCONF com lock
         for reg in registros_prodconf:
             rows = _buscar_prodconf(cur, reg, lock=True)
 
@@ -243,7 +238,6 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf) -> Re
                     f"encontrados={len(rows)}; esperado=1."
                 )
 
-        # UPDATE LOGCONF
         for item in logconf:
             cur.execute(
                 """
@@ -273,12 +267,10 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf) -> Re
 
             resultado.logconf_atualizados += 1
 
-        # UPDATE PRODCONF
         for reg in registros_prodconf:
             _update_prodconf(cur, reg)
             resultado.prodconf_atualizados += 1
 
-        # Verificação LOGCONF antes do COMMIT
         for item in logconf:
             cur.execute(
                 """
@@ -311,7 +303,6 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf) -> Re
                     f"Esperado={esperado!r} Obtido={obtido!r}"
                 )
 
-        # Verificação PRODCONF antes do COMMIT
         for reg in registros_prodconf:
             rows = _buscar_prodconf(cur, reg, lock=False)
 
@@ -325,11 +316,13 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf) -> Re
             esperado = (
                 _numero_normalizado(reg.qtde_lido),
                 _numero_normalizado(reg.saldo),
+                _texto(reg.localizacao),
                 _texto(reg.status).upper(),
             )
             obtido = (
                 _numero_normalizado(row.QtdeLido),
                 _numero_normalizado(row.Saldo),
+                _texto(row.Localizacao),
                 _texto(row.Status).upper(),
             )
 

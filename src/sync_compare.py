@@ -70,27 +70,9 @@ def _adicionar_resultado(resumo: ResumoComparacao, resultado: ResultadoComparaca
 
 
 def comparar_logconf(settings, registros) -> ResumoComparacao:
-    """
-    LOGCONF
-
-    A tabela dbo.logConf já possui uma linha por nota.
-    O arquivo pode conter várias ocorrências da mesma NumNF.
-
-    Consolidação por NumNF:
-    - UserIniConf / HoraIniConf: primeira ocorrência da nota.
-    - Se existir ocorrência CONFERIDO:
-        UserFimConf / HoraFimConf / StatusConf vêm da última ocorrência CONFERIDO.
-    - Caso contrário:
-        UserFimConf e HoraFimConf ficam vazios e StatusConf fica ANDAMENTO.
-
-    A localização no SQL Server é feita somente por NumNF.
-    Somente consulta/compara.
-    Não executa INSERT nem UPDATE.
-    """
     resumo = ResumoComparacao()
     conn = get_connection(settings.sql)
 
-    # Preserva a ordem da primeira ocorrência de cada nota.
     consolidados = {}
 
     for reg in registros:
@@ -109,8 +91,6 @@ def comparar_logconf(settings, registros) -> ResumoComparacao:
 
         status_atual = _norm_texto(reg.status).upper()
 
-        # Se a nota foi concluída, a última ocorrência CONFERIDO
-        # representa o estado final da conferência.
         if status_atual == "CONFERIDO":
             consolidados[num_nf]["user_fim"] = _norm_texto(reg.user_fim)
             consolidados[num_nf]["hora_fim"] = _norm_hora(reg.hora_fim)
@@ -172,31 +152,11 @@ def comparar_logconf(settings, registros) -> ResumoComparacao:
                 row = rows[0]
 
                 comparacoes = [
-                    (
-                        "UserIniConf",
-                        _norm_texto(row.UserIniConf),
-                        dados["user_ini"],
-                    ),
-                    (
-                        "UserFimConf",
-                        _norm_texto(row.UserFimConf),
-                        dados["user_fim"],
-                    ),
-                    (
-                        "HoraIniConf",
-                        _norm_hora(row.HoraIniConf),
-                        dados["hora_ini"],
-                    ),
-                    (
-                        "HoraFimConf",
-                        _norm_hora(row.HoraFimConf),
-                        dados["hora_fim"],
-                    ),
-                    (
-                        "StatusConf",
-                        _norm_texto(row.StatusConf).upper(),
-                        dados["status"],
-                    ),
+                    ("UserIniConf", _norm_texto(row.UserIniConf), dados["user_ini"]),
+                    ("UserFimConf", _norm_texto(row.UserFimConf), dados["user_fim"]),
+                    ("HoraIniConf", _norm_hora(row.HoraIniConf), dados["hora_ini"]),
+                    ("HoraFimConf", _norm_hora(row.HoraFimConf), dados["hora_fim"]),
+                    ("StatusConf", _norm_texto(row.StatusConf).upper(), dados["status"]),
                 ]
 
                 diferencas = [
@@ -233,21 +193,8 @@ def comparar_logconf(settings, registros) -> ResumoComparacao:
 
     return resumo
 
+
 def comparar_prodconf(settings, registros) -> ResumoComparacao:
-    """
-    PRODCONF
-
-    NumDoc corresponde à nota.
-
-    Localização:
-    - apenas CodProd: NumDoc + CodProd
-    - apenas EAN/GTIN: NumDoc + GTIN
-    - ambos: NumDoc + (CodProd OU GTIN)
-
-    Mais de um resultado = busca ambígua.
-    Somente consulta/compara.
-    """
-
     resumo = ResumoComparacao()
     conn = get_connection(settings.sql)
 
@@ -274,6 +221,7 @@ def comparar_prodconf(settings, registros) -> ResumoComparacao:
                             GTIN,
                             QtdeLido,
                             Saldo,
+                            Localizacao,
                             Status
                         FROM dbo.prodConf
                         WHERE CAST(NumDoc AS VARCHAR(50)) = ?
@@ -283,11 +231,7 @@ def comparar_prodconf(settings, registros) -> ResumoComparacao:
                                 LTRIM(RTRIM(ISNULL(CAST(GTIN AS VARCHAR(100)), ''))) = ?
                               )
                         """,
-                        (
-                            str(reg.num_doc),
-                            cod,
-                            ean,
-                        ),
+                        (str(reg.num_doc), cod, ean),
                     )
 
                 elif cod:
@@ -299,6 +243,7 @@ def comparar_prodconf(settings, registros) -> ResumoComparacao:
                             GTIN,
                             QtdeLido,
                             Saldo,
+                            Localizacao,
                             Status
                         FROM dbo.prodConf
                         WHERE CAST(NumDoc AS VARCHAR(50)) = ?
@@ -311,10 +256,7 @@ def comparar_prodconf(settings, registros) -> ResumoComparacao:
                                 )
                               ) = ?
                         """,
-                        (
-                            str(reg.num_doc),
-                            cod,
-                        ),
+                        (str(reg.num_doc), cod),
                     )
 
                 else:
@@ -326,6 +268,7 @@ def comparar_prodconf(settings, registros) -> ResumoComparacao:
                             GTIN,
                             QtdeLido,
                             Saldo,
+                            Localizacao,
                             Status
                         FROM dbo.prodConf
                         WHERE CAST(NumDoc AS VARCHAR(50)) = ?
@@ -338,10 +281,7 @@ def comparar_prodconf(settings, registros) -> ResumoComparacao:
                                 )
                               ) = ?
                         """,
-                        (
-                            str(reg.num_doc),
-                            ean,
-                        ),
+                        (str(reg.num_doc), ean),
                     )
 
                 rows = cur.fetchall()
@@ -386,6 +326,11 @@ def comparar_prodconf(settings, registros) -> ResumoComparacao:
                         _norm_numero(reg.saldo),
                     ),
                     (
+                        "Localizacao",
+                        _norm_texto(row.Localizacao),
+                        _norm_texto(reg.localizacao),
+                    ),
+                    (
                         "Status",
                         _norm_texto(row.Status).upper(),
                         _norm_texto(reg.status).upper(),
@@ -393,11 +338,7 @@ def comparar_prodconf(settings, registros) -> ResumoComparacao:
                 ]
 
                 diferencas = [
-                    DiferencaCampo(
-                        campo,
-                        valor_sql,
-                        valor_txt,
-                    )
+                    DiferencaCampo(campo, valor_sql, valor_txt)
                     for campo, valor_sql, valor_txt in comparacoes
                     if valor_sql != valor_txt
                 ]
@@ -408,11 +349,7 @@ def comparar_prodconf(settings, registros) -> ResumoComparacao:
                         tipo="PRODCONF",
                         linha=reg.linha,
                         chave=chave,
-                        situacao=(
-                            "DIFERENTE"
-                            if diferencas
-                            else "IGUAL"
-                        ),
+                        situacao="DIFERENTE" if diferencas else "IGUAL",
                         diferencas=diferencas,
                     ),
                 )

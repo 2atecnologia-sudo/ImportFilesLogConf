@@ -36,6 +36,7 @@ class ProdConfRegistro:
     saldo: Decimal
     ean: str
     cod_prod: str
+    localizacao: str
     status: str
 
 
@@ -107,8 +108,6 @@ def _detectar_separador(linhas: List[str], campos_esperados: int) -> Optional[st
     if not linhas_validacao:
         return None
 
-    # testa algumas linhas para evitar decidir
-    # com base em uma única linha problemática
     amostra = linhas_validacao[:10]
 
     melhor_separador = None
@@ -153,7 +152,6 @@ def _decimal(valor: str) -> Decimal:
     if valor == "":
         raise ValueError("valor numérico vazio")
 
-    # tolera decimal com vírgula caso algum equipamento envie assim
     valor = valor.replace(",", ".")
 
     try:
@@ -321,14 +319,14 @@ def parse_prodconf(path: str) -> ResultadoArquivo:
 
     separador = _detectar_separador(
         linhas_com_conteudo,
-        campos_esperados=6
+        campos_esperados=7
     )
 
     if separador is None:
 
         resultado.erro_estrutural = (
             "Não foi possível identificar o separador "
-            "ou o arquivo não possui o layout de 6 campos."
+            "ou o arquivo não possui o layout de 7 campos."
         )
 
         return resultado
@@ -357,7 +355,7 @@ def parse_prodconf(path: str) -> ResultadoArquivo:
             for p in linha.split(separador)
         ]
 
-        if len(partes) != 6:
+        if len(partes) != 7:
 
             resultado.erros.append(
                 ErroRegistro(
@@ -366,7 +364,7 @@ def parse_prodconf(path: str) -> ResultadoArquivo:
                     conteudo=linha_original,
                     motivo=(
                         f"Quantidade de campos inválida. "
-                        f"Esperado=6, recebido={len(partes)}."
+                        f"Esperado=7, recebido={len(partes)}."
                     )
                 )
             )
@@ -380,6 +378,7 @@ def parse_prodconf(path: str) -> ResultadoArquivo:
             saldo_raw,
             ean,
             cod_prod,
+            localizacao,
             status,
         ) = partes
 
@@ -396,12 +395,6 @@ def parse_prodconf(path: str) -> ResultadoArquivo:
 
             resultado.registros_invalidos += 1
             continue
-
-        # Pelo combinado:
-        # pode existir EAN,
-        # pode existir CODPROD,
-        # podem existir os dois,
-        # mas nunca os dois vazios.
 
         if not ean and not cod_prod:
 
@@ -459,6 +452,7 @@ def parse_prodconf(path: str) -> ResultadoArquivo:
             saldo=saldo,
             ean=ean,
             cod_prod=cod_prod,
+            localizacao=localizacao,
             status=status,
         )
 
