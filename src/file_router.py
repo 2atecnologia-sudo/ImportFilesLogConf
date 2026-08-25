@@ -7,7 +7,7 @@ from typing import Optional
 
 
 _FILE_PATTERN = re.compile(
-    r"^(nflog|logconf|confprod|prodconf)-(.+)\.txt$",
+    r"^(nflog|logconf|confprod|prodconf)-(.+?)\.txt(\.ok)?$",
     re.IGNORECASE,
 )
 
@@ -18,21 +18,11 @@ class InputFileInfo:
     coletor_id: str
     nome_arquivo: str
     caminho: str
+    confirmado: bool = False
 
 
 def identificar_arquivo(file_path: str) -> Optional[InputFileInfo]:
-    """
-    Reconhece:
-
-        nflog-<id>.txt
-        logconf-<id>.txt
-        confprod-<id>.txt
-
-    Maiúsculas/minúsculas não fazem diferença.
-    """
-
     nome = os.path.basename(file_path)
-
     match = _FILE_PATTERN.match(nome)
 
     if not match:
@@ -40,9 +30,13 @@ def identificar_arquivo(file_path: str) -> Optional[InputFileInfo]:
 
     tipo = match.group(1).lower()
     coletor_id = match.group(2)
+    confirmado = bool(match.group(3))
 
     if tipo == "prodconf":
         tipo = "confprod"
+
+    if confirmado and tipo != "nflog":
+        return None
 
     if not coletor_id.strip():
         return None
@@ -52,6 +46,7 @@ def identificar_arquivo(file_path: str) -> Optional[InputFileInfo]:
         coletor_id=coletor_id,
         nome_arquivo=nome,
         caminho=file_path,
+        confirmado=confirmado,
     )
 
 
@@ -59,25 +54,14 @@ def localizar_par_sync(
     input_dir: str,
     coletor_id: str,
 ) -> tuple[Optional[str], Optional[str]]:
-    """
-    Procura na pasta de entrada o par:
-
-        logconf-<id>.txt
-        confprod-<id>.txt
-
-    A comparação é case-insensitive.
-    """
-
     logconf = None
     confprod = None
-
     coletor_normalizado = coletor_id.lower()
 
     if not os.path.isdir(input_dir):
         return None, None
 
     for nome in os.listdir(input_dir):
-
         caminho = os.path.join(input_dir, nome)
 
         if not os.path.isfile(caminho):
@@ -91,10 +75,9 @@ def localizar_par_sync(
         if info.coletor_id.lower() != coletor_normalizado:
             continue
 
-        if info.tipo == "logconf":
+        if info.tipo == "logconf" and not info.confirmado:
             logconf = caminho
-
-        elif info.tipo == "confprod":
+        elif info.tipo == "confprod" and not info.confirmado:
             confprod = caminho
 
     return logconf, confprod

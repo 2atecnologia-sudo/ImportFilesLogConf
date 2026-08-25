@@ -14,3 +14,15 @@ Thumbs.db
 Desktop.ini
 
 *.bat
+
+Add-Content .gitignore "`n.venv/`nbuild/`ndist/"
+*.backup_*
+aplicar_*.py
+
+.venv/
+build/
+dist/
+
+.venv/
+build/
+dist/

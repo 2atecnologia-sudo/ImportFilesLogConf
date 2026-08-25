@@ -310,19 +310,17 @@ def _process_file_impl(file_path: str, settings):
         return
 
     # =====================================================
-    # TXT
+    # TXT / NFLOG CONFIRMADO (.txt.ok)
     # =====================================================
-
-    if ext != ".txt":
-        return
 
     info = identificar_arquivo(file_path)
 
     if info is None:
-        logging.warning(
-            f"[ARQUIVO IGNORADO] Nome fora do padrão: "
-            f"{os.path.basename(file_path)}"
-        )
+        if ext in (".txt", ".ok"):
+            logging.warning(
+                f"[ARQUIVO IGNORADO] Nome fora do padrão: "
+                f"{os.path.basename(file_path)}"
+            )
         return
 
     logging.info(
@@ -333,24 +331,77 @@ def _process_file_impl(file_path: str, settings):
 
     # =====================================================
     # NFLOG
-    # Mantém a rotina atual
+    # .txt    = recebido e aguarda o coletor.
+    # .txt.ok = coletor confirmou a importação.
     # =====================================================
 
     if info.tipo == "nflog":
         if not wait_file_stable(file_path):
             raise RuntimeError(
-                "NFLOG não estabilizou (cópia incompleta?)."
+                "NFLOG não estabilizou (cópia/rename incompleto?)."
             )
 
+        if not info.confirmado:
+            logging.info(
+                f"[NFLOG RECEBIDO] "
+                f"Coletor={info.coletor_id} | "
+                f"Arquivo={info.nome_arquivo} | "
+                f"Aguardando importação pelo coletor."
+            )
+            return
+
         logging.info(
-            f"[NFLOG] Iniciando processamento | "
+            f"[NFLOG IMPORTADO] "
             f"Coletor={info.coletor_id} | "
-            f"Arquivo={info.nome_arquivo}"
+            f"Arquivo={info.nome_arquivo} | "
+            f"Confirmacao=.ok"
         )
 
-        process_txt(
-            file_path,
-            settings,
+        nflog_processados_dir = os.path.join(
+            settings.watch.processed_dir,
+            "nflog",
+        )
+        ensure_dirs(nflog_processados_dir)
+
+        nome_original = os.path.basename(file_path)
+        sufixo = ".txt.ok"
+        timestamp = time.strftime("%d%m%Y_%H%M%S")
+
+        if nome_original.lower().endswith(sufixo):
+            base_sem_sufixo = nome_original[:-len(sufixo)]
+            nome_destino = (
+                f"{base_sem_sufixo}_{timestamp}.txt"
+            )
+        else:
+            nome_destino = f"{nome_original}_{timestamp}.txt"
+
+        destino_final = os.path.join(
+            nflog_processados_dir,
+            nome_destino,
+        )
+
+        contador = 1
+        while os.path.exists(destino_final):
+            if nome_original.lower().endswith(sufixo):
+                nome_destino = (
+                    f"{base_sem_sufixo}_{timestamp}_{contador}.txt"
+                )
+            else:
+                nome_destino = (
+                    f"{nome_original}_{timestamp}_{contador}.txt"
+                )
+            destino_final = os.path.join(
+                nflog_processados_dir,
+                nome_destino,
+            )
+            contador += 1
+
+        shutil.move(file_path, destino_final)
+
+        logging.info(
+            f"[NFLOG ARQUIVADO] "
+            f"Coletor={info.coletor_id} | "
+            f"Destino={destino_final}"
         )
         return
 
@@ -706,14 +757,15 @@ def process_file(file_path: str, settings):
     settings = load_settings()
 
     ext = os.path.splitext(file_path)[1].lower()
-
-    # XML e nomes TXT fora do padrão seguem a rotina normal.
-    if ext != ".txt":
-        return _process_file_impl(file_path, settings)
-
     info = identificar_arquivo(file_path)
 
-    if info is None or info.tipo == "nflog":
+    if info is None:
+        return _process_file_impl(file_path, settings)
+
+    if info.tipo == "nflog":
+        return _process_file_impl(file_path, settings)
+
+    if ext != ".txt":
         return _process_file_impl(file_path, settings)
 
     if not _tentar_reservar_coletor(info.coletor_id):
@@ -842,13 +894,25 @@ def process_existing(settings):
 
 
 def _tem_arquivos_pendentes(settings) -> bool:
-    """Retorna True quando existe algum arquivo de entrada aguardando processamento."""
+    # NFLOG não depende do SQL Server e não dispara retry SQL.
     inp = settings.watch.input_dir
+
     try:
-        return any(
-            os.path.isfile(os.path.join(inp, name))
-            for name in os.listdir(inp)
-        )
+        for name in os.listdir(inp):
+            path = os.path.join(inp, name)
+
+            if not os.path.isfile(path):
+                continue
+
+            info = identificar_arquivo(path)
+
+            if info is not None and info.tipo == "nflog":
+                continue
+
+            return True
+
+        return False
+
     except (FileNotFoundError, OSError):
         return False
 
