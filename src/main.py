@@ -16,9 +16,9 @@ from .db import get_connection, numdoc_exists, insert_prodconf_items
 from .parser_xml import parse_nfe_xml
 from .parser_txt import parse_txt_documents
 from .file_router import identificar_arquivo, localizar_par_sync
-from .parser_sync import parse_logconf, parse_prodconf
+from .parser_sync import parse_logconf, parse_prodconf, parse_scanocor
 from .sync_compare import comparar_logconf, comparar_prodconf
-from .sync_apply import aplicar_sincronizacao, SyncWriteError
+from .sync_apply import aplicar_sincronizacao, aplicar_scanocor, SyncWriteError
 from .sql_diagnostics import diagnosticar_erro_sql
 from .runtime_status import write_runtime_status
 from .single_instance import SingleInstance
@@ -211,7 +211,7 @@ def process_xml(file_path: str, settings):
         raise
 
 
-def process_txt(file_path: str, settings):
+def process_txt(file_path: str, settings, coletor_id: str | None = None):
     docs = parse_txt_documents(
         file_path,
         delimiter=settings.txt.delimiter,
@@ -249,6 +249,7 @@ def process_txt(file_path: str, settings):
                 nomecli,
                 itens,
                 settings.app.status_inicial,
+                coletor_id=coletor_id,
             )
 
             imported += 1
@@ -260,21 +261,21 @@ def process_txt(file_path: str, settings):
         conn.close()
 
         if imported > 0:
-            safe_move(
-                file_path,
-                settings.watch.processed_dir,
+            logging.info(
+                f"[NFLOG SQL OK] "
+                f"Arquivo={os.path.basename(file_path)} | "
+                f"DocumentosImportados={imported} | "
+                f"Arquivo preservado em entrada aguardando .ok do coletor."
+            )
+        elif skipped_dup > 0:
+            logging.info(
+                f"[NFLOG SQL JA IMPORTADO] "
+                f"Arquivo={os.path.basename(file_path)} | "
+                f"Duplicados={skipped_dup} | "
+                f"Arquivo preservado em entrada aguardando .ok do coletor."
             )
         else:
-            if skipped_dup > 0:
-                safe_move(
-                    file_path,
-                    settings.watch.duplicate_dir,
-                )
-            else:
-                safe_move(
-                    file_path,
-                    settings.watch.error_dir,
-                )
+            raise ValueError("NFLOG sem documentos novos ou duplicados válidos.")
 
     except Exception:
         try:
@@ -346,15 +347,28 @@ def _process_file_impl(file_path: str, settings):
                 f"[NFLOG RECEBIDO] "
                 f"Coletor={info.coletor_id} | "
                 f"Arquivo={info.nome_arquivo} | "
-                f"Aguardando importação pelo coletor."
+                f"Iniciando importação no SQL antes da confirmação do coletor."
+            )
+
+            process_txt(
+                file_path,
+                settings,
+                coletor_id=info.coletor_id,
+            )
+
+            logging.info(
+                f"[NFLOG AGUARDANDO OK] "
+                f"Coletor={info.coletor_id} | "
+                f"Arquivo={info.nome_arquivo} | "
+                f"SQL processado. Arquivo mantido em entrada para o coletor."
             )
             return
 
         logging.info(
-            f"[NFLOG IMPORTADO] "
+            f"[NFLOG CONFIRMADO] "
             f"Coletor={info.coletor_id} | "
             f"Arquivo={info.nome_arquivo} | "
-            f"Confirmacao=.ok"
+            f"Confirmacao=.ok | Arquivando sem nova importação SQL."
         )
 
         nflog_processados_dir = os.path.join(
@@ -404,6 +418,121 @@ def _process_file_impl(file_path: str, settings):
             f"Destino={destino_final}"
         )
         return
+
+    # =====================================================
+    # SCANOCOR
+    # Histórico de ocorrências de leitura: somente INSERT.
+    # O ColetorID é extraído do nome do arquivo.
+    # =====================================================
+
+    if info.tipo == "scanocor":
+        if not wait_file_stable(file_path):
+            raise RuntimeError(
+                "SCANOCOR não estabilizou (cópia incompleta?)."
+            )
+
+        resultado_scanocor = parse_scanocor(file_path)
+
+        if not resultado_scanocor.arquivo_valido:
+            logging.error(
+                f"[SCANOCOR][ERRO ESTRUTURAL] "
+                f"Coletor={info.coletor_id} | "
+                f"Arquivo={info.nome_arquivo} | "
+                f"Motivo={resultado_scanocor.erro_estrutural} | "
+                f"Arquivo preservado."
+            )
+            return
+
+        logging.info(
+            f"[SCANOCOR] "
+            f"Coletor={info.coletor_id} | "
+            f"Arquivo={info.nome_arquivo} | "
+            f"Lidos={resultado_scanocor.registros_lidos} | "
+            f"Validos={resultado_scanocor.registros_validos} | "
+            f"Erros={resultado_scanocor.registros_invalidos}"
+        )
+
+        for aviso in resultado_scanocor.avisos:
+            logging.warning(f"[SCANOCOR][AVISO] {aviso}")
+
+        for erro in resultado_scanocor.erros:
+            logging.error(
+                f"[SCANOCOR][REGISTRO INVALIDO] "
+                f"Linha={erro.linha} | "
+                f"Motivo={erro.motivo} | "
+                f"Conteudo={erro.conteudo}"
+            )
+
+        # Para o arquivo de ocorrências, linhas inválidas não impedem
+        # as linhas válidas de serem espelhadas no SQL.
+        if not resultado_scanocor.registros:
+            logging.warning(
+                f"[SCANOCOR][SEM REGISTROS VALIDOS] "
+                f"Coletor={info.coletor_id} | "
+                f"Arquivo={info.nome_arquivo} | "
+                f"Arquivo preservado."
+            )
+            return
+
+        try:
+            gravacao_scan = aplicar_scanocor(
+                settings,
+                resultado_scanocor.registros,
+                info.coletor_id,
+            )
+
+            scanocor_processados_dir = os.path.join(
+                settings.watch.processed_dir,
+                "scanocor",
+            )
+            destino_scan = safe_move(
+                file_path,
+                scanocor_processados_dir,
+            )
+
+            logging.info(
+                f"[SCANOCOR GRAVACAO OK] "
+                f"Coletor={info.coletor_id} | "
+                f"Inseridos={gravacao_scan.scanocor_inseridos} | "
+                f"DuplicadosIgnorados={gravacao_scan.scanocor_duplicados} | "
+                f"Destino={destino_scan} | "
+                f"COMMIT=OK"
+            )
+
+            write_runtime_status(
+                BASE_DIR,
+                {
+                    "estado": "OK",
+                    "titulo": "Ocorrências importadas",
+                    "coletor": info.coletor_id,
+                    "arquivo": info.nome_arquivo,
+                    "mensagem": (
+                        f"SCANOCOR importado. "
+                        f"Inseridos={gravacao_scan.scanocor_inseridos}; "
+                        f"Duplicados ignorados={gravacao_scan.scanocor_duplicados}; "
+                        f"Linhas inválidas={resultado_scanocor.registros_invalidos}."
+                    ),
+                    "orientacao": "",
+                },
+            )
+            return
+
+        except Exception as e:
+            diagnostico = diagnosticar_erro_sql(e)
+
+            logging.error(
+                f"[SCANOCOR][SQL PENDENTE] "
+                f"Coletor={info.coletor_id} | "
+                f"Tipo={diagnostico['tipo']} | "
+                f"Titulo={diagnostico['titulo']} | "
+                f"Codigo={diagnostico['codigo']} | "
+                f"Orientacao={diagnostico['orientacao']} | "
+                f"Arquivo preservado para reprocessamento."
+            )
+            logging.error(
+                f"[SCANOCOR][SQL DETALHE] {diagnostico['mensagem']}"
+            )
+            return
 
     # =====================================================
     # LOGCONF / CONFPROD
@@ -665,6 +794,7 @@ def _process_file_impl(file_path: str, settings):
             settings,
             resultado_logconf.registros,
             resultado_prodconf.registros,
+            info.coletor_id,
         )
 
         logging.info(
@@ -894,7 +1024,7 @@ def process_existing(settings):
 
 
 def _tem_arquivos_pendentes(settings) -> bool:
-    # NFLOG não depende do SQL Server e não dispara retry SQL.
+    # NFLOG .txt depende do SQL; somente .txt.ok não precisa de retry SQL.
     inp = settings.watch.input_dir
 
     try:
@@ -907,7 +1037,10 @@ def _tem_arquivos_pendentes(settings) -> bool:
             info = identificar_arquivo(path)
 
             if info is not None and info.tipo == "nflog":
-                continue
+                # NFLOG .txt precisa de SQL; NFLOG .txt.ok só precisa ser arquivado.
+                if info.confirmado:
+                    continue
+                return True
 
             return True
 

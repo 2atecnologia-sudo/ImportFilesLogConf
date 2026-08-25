@@ -14,6 +14,8 @@ class SyncWriteError(RuntimeError):
 class ResultadoGravacao:
     logconf_atualizados: int = 0
     prodconf_atualizados: int = 0
+    scanocor_inseridos: int = 0
+    scanocor_duplicados: int = 0
 
 
 def _texto(valor) -> str:
@@ -151,7 +153,7 @@ def _buscar_prodconf(cur, reg, lock: bool = False):
     return cur.fetchall()
 
 
-def _update_prodconf(cur, reg):
+def _update_prodconf(cur, reg, coletor_id: str = ""):
     ean = _texto(reg.ean)
     cod = _texto(reg.cod_prod)
 
@@ -160,12 +162,13 @@ def _update_prodconf(cur, reg):
         _decimal_ou_none(reg.saldo),
         _texto(reg.localizacao) or None,
         _texto(reg.status).upper(),
+        _texto(coletor_id) or None,
     )
 
     if ean and cod:
         sql = """
             UPDATE dbo.prodConf
-               SET QtdeLido = ?, Saldo = ?, Localizacao = ?, Status = ?
+               SET QtdeLido = ?, Saldo = ?, Localizacao = ?, Status = ?, ColetorID = ?
              WHERE CAST(NumDoc AS VARCHAR(50)) = ?
                AND (
                     LTRIM(RTRIM(ISNULL(CAST(CodProd AS VARCHAR(100)), ''))) = ?
@@ -178,7 +181,7 @@ def _update_prodconf(cur, reg):
     elif cod:
         sql = """
             UPDATE dbo.prodConf
-               SET QtdeLido = ?, Saldo = ?, Localizacao = ?, Status = ?
+               SET QtdeLido = ?, Saldo = ?, Localizacao = ?, Status = ?, ColetorID = ?
              WHERE CAST(NumDoc AS VARCHAR(50)) = ?
                AND LTRIM(RTRIM(ISNULL(CAST(CodProd AS VARCHAR(100)), ''))) = ?
         """
@@ -187,7 +190,7 @@ def _update_prodconf(cur, reg):
     else:
         sql = """
             UPDATE dbo.prodConf
-               SET QtdeLido = ?, Saldo = ?, Localizacao = ?, Status = ?
+               SET QtdeLido = ?, Saldo = ?, Localizacao = ?, Status = ?, ColetorID = ?
              WHERE CAST(NumDoc AS VARCHAR(50)) = ?
                AND LTRIM(RTRIM(ISNULL(CAST(GTIN AS VARCHAR(100)), ''))) = ?
         """
@@ -202,7 +205,7 @@ def _update_prodconf(cur, reg):
         )
 
 
-def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf) -> ResultadoGravacao:
+def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf, coletor_id: str = "") -> ResultadoGravacao:
     conn = get_connection(settings.sql)
     resultado = ResultadoGravacao()
 
@@ -255,6 +258,7 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf) -> Re
                     _valor_hora_para_sql(item["hora_ini"], tipo_hora_ini),
                     _valor_hora_para_sql(item["hora_fim"], tipo_hora_fim),
                     item["status"],
+                    _texto(coletor_id) or None,
                     int(item["num_nf"]),
                 ),
             )
@@ -268,7 +272,7 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf) -> Re
             resultado.logconf_atualizados += 1
 
         for reg in registros_prodconf:
-            _update_prodconf(cur, reg)
+            _update_prodconf(cur, reg, coletor_id)
             resultado.prodconf_atualizados += 1
 
         for item in logconf:
@@ -343,5 +347,79 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf) -> Re
             pass
         raise
 
+    finally:
+        conn.close()
+
+def aplicar_scanocor(settings, registros_scanocor, coletor_id: str) -> ResultadoGravacao:
+    """
+    Insere ocorrências de leitura em dbo.scanocorconf.
+    Não faz UPDATE. Duplicidades são ignoradas pela chave lógica:
+    NumNota + CodigoLido + DataErro + HoraErro + UserConf + ColetorID.
+    """
+    conn = get_connection(settings.sql)
+    resultado = ResultadoGravacao()
+    coletor_id = _texto(coletor_id)
+
+    if not coletor_id:
+        raise SyncWriteError("SCANOCOR: ColetorID vazio.")
+
+    try:
+        cur = conn.cursor()
+
+        for reg in registros_scanocor:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM dbo.scanocorconf WITH (UPDLOCK, HOLDLOCK)
+                WHERE CAST(NumNota AS VARCHAR(50)) = ?
+                  AND LTRIM(RTRIM(ISNULL(CAST(CodigoLido AS VARCHAR(100)), ''))) = ?
+                  AND DataErro = ?
+                  AND HoraErro = ?
+                  AND LTRIM(RTRIM(ISNULL(CAST(UserConf AS VARCHAR(100)), ''))) = ?
+                  AND LTRIM(RTRIM(ISNULL(CAST(ColetorID AS VARCHAR(100)), ''))) = ?
+                """,
+                (
+                    str(reg.num_nota),
+                    _texto(reg.codigo_lido),
+                    reg.data_erro,
+                    reg.hora_erro,
+                    _texto(reg.user_conf),
+                    coletor_id,
+                ),
+            )
+
+            if int(cur.fetchone()[0]) > 0:
+                resultado.scanocor_duplicados += 1
+                continue
+
+            cur.execute(
+                """
+                INSERT INTO dbo.scanocorconf
+                    (NumNota, NomeCli, CodigoLido, MotivoErro,
+                     DataErro, HoraErro, UserConf, ColetorID)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(reg.num_nota),
+                    _texto(reg.nome_cli) or None,
+                    _texto(reg.codigo_lido) or None,
+                    _texto(reg.motivo_erro) or None,
+                    reg.data_erro,
+                    reg.hora_erro,
+                    _texto(reg.user_conf) or None,
+                    coletor_id,
+                ),
+            )
+            resultado.scanocor_inseridos += 1
+
+        conn.commit()
+        return resultado
+
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
     finally:
         conn.close()

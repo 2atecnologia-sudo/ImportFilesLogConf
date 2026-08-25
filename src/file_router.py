@@ -11,6 +11,11 @@ _FILE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_SCANOCOR_PATTERN = re.compile(
+    r"^(.+?)_ScanOcor-(.+?)\.txt$",
+    re.IGNORECASE,
+)
+
 
 @dataclass(frozen=True)
 class InputFileInfo:
@@ -23,6 +28,20 @@ class InputFileInfo:
 
 def identificar_arquivo(file_path: str) -> Optional[InputFileInfo]:
     nome = os.path.basename(file_path)
+
+    scan_match = _SCANOCOR_PATTERN.match(nome)
+    if scan_match:
+        coletor_id = scan_match.group(2).strip()
+        if not coletor_id:
+            return None
+        return InputFileInfo(
+            tipo="scanocor",
+            coletor_id=coletor_id,
+            nome_arquivo=nome,
+            caminho=file_path,
+            confirmado=False,
+        )
+
     match = _FILE_PATTERN.match(nome)
 
     if not match:

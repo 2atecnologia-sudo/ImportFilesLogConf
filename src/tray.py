@@ -37,6 +37,28 @@ CONFIG_EXE = os.path.join(
     "ImportFilesLogConfConfig.exe"
 )
 
+# XML Downloader
+# Em desenvolvimento, usa o projeto separado e o Python do .venv dele.
+# Compilado, procura o executável do XML Downloader na mesma pasta do Tray.
+XMLSYNC_DEV_DIR = r"C:\projetos\2AXMLSyncService"
+
+XMLSYNC_DEV_PYTHON = os.path.join(
+    XMLSYNC_DEV_DIR,
+    ".venv",
+    "Scripts",
+    "python.exe",
+)
+
+XMLSYNC_DEV_MAIN = os.path.join(
+    XMLSYNC_DEV_DIR,
+    "main.py",
+)
+
+XMLSYNC_EXE = os.path.join(
+    BASE_DIR,
+    "2AXMLSyncService.exe",
+)
+
 _importer_proc = None
 
 
@@ -426,6 +448,65 @@ def reprocess_pending(icon, item=None):
     ).start()
 
 
+def open_xml_downloader(icon, item=None):
+    try:
+        if getattr(sys, "frozen", False):
+            # Produção / servidor:
+            # o XML Downloader fica na mesma pasta do Tray.
+            if not os.path.exists(XMLSYNC_EXE):
+                _mostrar_mensagem(
+                    APP_NAME,
+                    f"XML Downloader não encontrado:\n{XMLSYNC_EXE}",
+                    "error",
+                )
+                return
+
+            subprocess.Popen(
+                [XMLSYNC_EXE],
+                cwd=BASE_DIR,
+            )
+
+        else:
+            # Desenvolvimento:
+            # usa o projeto 2AXMLSyncService e o .venv próprio dele.
+            if not os.path.exists(XMLSYNC_DEV_PYTHON):
+                _mostrar_mensagem(
+                    APP_NAME,
+                    (
+                        "Python do XML Downloader não encontrado:\n"
+                        f"{XMLSYNC_DEV_PYTHON}"
+                    ),
+                    "error",
+                )
+                return
+
+            if not os.path.exists(XMLSYNC_DEV_MAIN):
+                _mostrar_mensagem(
+                    APP_NAME,
+                    (
+                        "XML Downloader não encontrado:\n"
+                        f"{XMLSYNC_DEV_MAIN}"
+                    ),
+                    "error",
+                )
+                return
+
+            subprocess.Popen(
+                [
+                    XMLSYNC_DEV_PYTHON,
+                    XMLSYNC_DEV_MAIN,
+                ],
+                cwd=XMLSYNC_DEV_DIR,
+            )
+
+    except Exception as e:
+        _mostrar_mensagem(
+            APP_NAME,
+            f"Não foi possível abrir o XML Downloader.\n\n{e}",
+            "error",
+        )
+
+
 def quit_all(icon, item=None):
     """
     Encerra o Importer e toda a sua árvore de processos antes de fechar o Tray.
@@ -455,9 +536,16 @@ def run_tray():
 
     menu = pystray.Menu(
         pystray.MenuItem(
-            "Status",
-            show_status,
+            "Abrir XML Downloader",
+            open_xml_downloader,
             default=True
+        ),
+
+        pystray.Menu.SEPARATOR,
+
+        pystray.MenuItem(
+            "Status",
+            show_status
         ),
 
         pystray.MenuItem(

@@ -77,7 +77,7 @@ def prodconf_has_column(conn, column_name: str) -> bool:
     return cur.fetchone() is not None
 
 
-def insert_logconf_header(conn, num_nf: str, nome_cli: str, status_conf: str = "AGUARDANDO"):
+def insert_logconf_header(conn, num_nf: str, nome_cli: str, status_conf: str = "AGUARDANDO", coletor_id: str | None = None):
     """
     Insere 1 linha em dbo.logConf com (NumNF, NomeCli, StatusConf).
     Se já existir, não faz nada.
@@ -93,13 +93,13 @@ def insert_logconf_header(conn, num_nf: str, nome_cli: str, status_conf: str = "
         return
 
     sql = """
-    INSERT INTO dbo.logConf (NumNF, NomeCli, StatusConf)
-    VALUES (?, ?, ?)
+    INSERT INTO dbo.logConf (NumNF, NomeCli, StatusConf, ColetorID)
+    VALUES (?, ?, ?, ?)
     """
-    cur.execute(sql, (num_nf_db, str(nome_cli)[:80], status_conf))
+    cur.execute(sql, (num_nf_db, str(nome_cli)[:80], status_conf, str(coletor_id or "")[:100]))
 
 
-def insert_prodconf_items(conn, num_doc: str, nome_cli: str, itens: list[dict], status_inicial: str):
+def insert_prodconf_items(conn, num_doc: str, nome_cli: str, itens: list[dict], status_inicial: str, coletor_id: str | None = None):
     """
     Insere cabeçalho em dbo.logConf (NumNF, NomeCli, StatusConf="AGUARDANDO")
     e itens em dbo.prodConf.
@@ -115,22 +115,22 @@ def insert_prodconf_items(conn, num_doc: str, nome_cli: str, itens: list[dict], 
     data_hora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # >>> Cabeçalho (logConf)
-    insert_logconf_header(conn, num_doc, nome_cli, status_conf="AGUARDANDO")
+    insert_logconf_header(conn, num_doc, nome_cli, status_conf="AGUARDANDO", coletor_id=coletor_id)
 
     # >>> Detalhe (prodConf)
     if has_nitem:
         sql = """
         INSERT INTO dbo.prodConf
-          (NumDoc, NomeCli, DataImp, NItem, CodProd, GTIN, DescProd, QtdeDoc, QtdeLido, Status, DataeHora)
+          (NumDoc, NomeCli, DataImp, NItem, CodProd, GTIN, DescProd, QtdeDoc, QtdeLido, Status, DataeHora, ColetorID)
         VALUES
-          (?,      ?,       ?,     ?,     ?,       ?,    ?,        ?,       ?,        ?,      ?)
+          (?,      ?,       ?,     ?,     ?,       ?,    ?,        ?,       ?,        ?,      ?,         ?)
         """
     else:
         sql = """
         INSERT INTO dbo.prodConf
-          (NumDoc, NomeCli, DataImp, CodProd, GTIN, DescProd, QtdeDoc, QtdeLido, Status, DataeHora)
+          (NumDoc, NomeCli, DataImp, CodProd, GTIN, DescProd, QtdeDoc, QtdeLido, Status, DataeHora, ColetorID)
         VALUES
-          (?,      ?,       ?,     ?,       ?,    ?,        ?,       ?,        ?,      ?)
+          (?,      ?,       ?,     ?,       ?,    ?,        ?,       ?,        ?,      ?,         ?)
         """
 
     cur = conn.cursor()
@@ -155,6 +155,7 @@ def insert_prodconf_items(conn, num_doc: str, nome_cli: str, itens: list[dict], 
                 qtde_lido,
                 str(status_inicial)[:3],
                 str(data_hora)[:50],
+                str(coletor_id or "")[:100],
             ))
         else:
             cur.execute(sql, (
@@ -168,6 +169,7 @@ def insert_prodconf_items(conn, num_doc: str, nome_cli: str, itens: list[dict], 
                 qtde_lido,
                 str(status_inicial)[:3],
                 str(data_hora)[:50],
+                str(coletor_id or "")[:100],
             ))
 
     conn.commit()

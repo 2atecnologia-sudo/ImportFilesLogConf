@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
+from datetime import datetime
 from typing import List, Optional
 
 
@@ -38,6 +39,18 @@ class ProdConfRegistro:
     cod_prod: str
     localizacao: str
     status: str
+
+
+@dataclass
+class ScanOcorRegistro:
+    linha: int
+    num_nota: str
+    nome_cli: str
+    codigo_lido: str
+    motivo_erro: str
+    data_erro: object
+    hora_erro: object
+    user_conf: str
 
 
 @dataclass
@@ -457,6 +470,115 @@ def parse_prodconf(path: str) -> ResultadoArquivo:
         )
 
         resultado.registros.append(registro)
+        resultado.registros_validos += 1
+
+    return resultado
+
+# ============================================================
+# SCANOCOR
+# ============================================================
+
+def parse_scanocor(path: str) -> ResultadoArquivo:
+    resultado = ResultadoArquivo(arquivo=path)
+    linhas = _ler_linhas(path)
+    linhas_com_conteudo = [linha for linha in linhas if linha.strip()]
+
+    if not linhas_com_conteudo:
+        resultado.erro_estrutural = "Arquivo SCANOCOR vazio."
+        return resultado
+
+    separador = _detectar_separador(linhas_com_conteudo, campos_esperados=6)
+    if separador is None:
+        resultado.erro_estrutural = (
+            "Não foi possível identificar o separador "
+            "ou o arquivo SCANOCOR não possui o layout de 6 campos."
+        )
+        return resultado
+
+    resultado.separador = separador
+    if separador != ";":
+        exibicao = "TAB" if separador == "\t" else separador
+        resultado.avisos.append(
+            f"Separador '{exibicao}' detectado. Arquivo normalizado internamente."
+        )
+
+    vistos = set()
+
+    for numero_linha, linha in enumerate(linhas, start=1):
+        linha_original = linha
+        if not linha.strip():
+            continue
+
+        resultado.registros_lidos += 1
+        partes = [p.strip() for p in linha.split(separador)]
+
+        if len(partes) != 6:
+            resultado.erros.append(
+                ErroRegistro(
+                    arquivo=path,
+                    linha=numero_linha,
+                    conteudo=linha_original,
+                    motivo=(
+                        f"Quantidade de campos inválida. "
+                        f"Esperado=6, recebido={len(partes)}."
+                    ),
+                )
+            )
+            resultado.registros_invalidos += 1
+            continue
+
+        num_nota, nome_cli, codigo_lido, motivo_erro, datahora_raw, user_conf = partes
+
+        if not _validar_numero_inteiro(num_nota):
+            resultado.erros.append(
+                ErroRegistro(path, numero_linha, linha_original, "NumNota inválido ou vazio.")
+            )
+            resultado.registros_invalidos += 1
+            continue
+
+        try:
+            # Formato real: AAAAMMDDHHMMSSmmm
+            if len(datahora_raw) < 14 or not datahora_raw.isdigit():
+                raise ValueError
+            dt = datetime.strptime(datahora_raw[:14], "%Y%m%d%H%M%S")
+        except ValueError:
+            resultado.erros.append(
+                ErroRegistro(
+                    path,
+                    numero_linha,
+                    linha_original,
+                    f"Dataehora inválida: '{datahora_raw}'. Esperado AAAAMMDDHHMMSSmmm.",
+                )
+            )
+            resultado.registros_invalidos += 1
+            continue
+
+        chave = (
+            num_nota,
+            codigo_lido,
+            dt.date(),
+            dt.time().replace(microsecond=0),
+            user_conf,
+        )
+        if chave in vistos:
+            resultado.avisos.append(
+                f"SCANOCOR linha {numero_linha}: ocorrência duplicada no próprio TXT; ignorada."
+            )
+            continue
+        vistos.add(chave)
+
+        resultado.registros.append(
+            ScanOcorRegistro(
+                linha=numero_linha,
+                num_nota=num_nota,
+                nome_cli=nome_cli,
+                codigo_lido=codigo_lido,
+                motivo_erro=motivo_erro,
+                data_erro=dt.date(),
+                hora_erro=dt.time().replace(microsecond=0),
+                user_conf=user_conf,
+            )
+        )
         resultado.registros_validos += 1
 
     return resultado
