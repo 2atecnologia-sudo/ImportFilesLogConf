@@ -115,12 +115,14 @@ class ConfigUI(tk.Tk):
         tab_paths = ttk.Frame(self.nb)
         tab_input = ttk.Frame(self.nb)
         tab_app = ttk.Frame(self.nb)
+        tab_output = ttk.Frame(self.nb)
         self.tab_status = ttk.Frame(self.nb)
 
         self.nb.add(tab_sql, text="SQL Server")
         self.nb.add(tab_paths, text="Pastas")
         self.nb.add(tab_input, text="Entrada (XML/TXT)")
         self.nb.add(tab_app, text="Aplicação")
+        self.nb.add(tab_output, text="Arquivos de Saída")
         self.nb.add(self.tab_status, text="Status / Logs")
 
         self.tab_about = ttk.Frame(self.nb)
@@ -198,6 +200,71 @@ class ConfigUI(tk.Tk):
         )
         chk_group.grid(row=1, column=0, columnspan=3, sticky="w", padx=8, pady=8)
         self.widgets["app.group_items"] = chk_group
+
+        # ---- Arquivos de Saída
+        fo = ttk.LabelFrame(tab_output, text="Configuração dos arquivos de saída")
+        fo.pack(fill="x", padx=10, pady=10)
+
+        self._dir(fo, "Pasta de saída", "output.output_dir", 0)
+
+        self.vars["output.product_id"] = tk.StringVar()
+        ttk.Label(fo, text="Identificação do produto").grid(row=1, column=0, sticky="w", padx=8, pady=6)
+        cmb_output_id = ttk.Combobox(
+            fo,
+            textvariable=self.vars["output.product_id"],
+            values=["Código interno", "GTIN / EAN", "Código interno + GTIN / EAN"],
+            state="readonly",
+            width=32,
+        )
+        cmb_output_id.grid(row=1, column=1, sticky="w", padx=8, pady=6)
+        self.widgets["output.product_id"] = cmb_output_id
+
+        self.vars["output.include_numdoc"] = tk.BooleanVar()
+        ttk.Checkbutton(fo, text="Incluir número do documento",
+                        variable=self.vars["output.include_numdoc"]).grid(
+            row=2, column=0, columnspan=3, sticky="w", padx=8, pady=6)
+
+        self.vars["output.individual_file"] = tk.BooleanVar()
+        ttk.Checkbutton(fo, text="Gerar arquivo individual por conferência",
+                        variable=self.vars["output.individual_file"]).grid(
+            row=3, column=0, columnspan=3, sticky="w", padx=8, pady=6)
+
+        self.vars["output.daily_file"] = tk.BooleanVar()
+        ttk.Checkbutton(fo, text="Gerar arquivo diário acumulado",
+                        variable=self.vars["output.daily_file"]).grid(
+            row=4, column=0, columnspan=3, sticky="w", padx=8, pady=6)
+
+        self.vars["output.delimiter"] = tk.StringVar()
+        ttk.Label(fo, text="Separador").grid(
+            row=5, column=0, sticky="w", padx=8, pady=6
+        )
+        ent_sep = ttk.Entry(
+            fo,
+            textvariable=self.vars["output.delimiter"],
+            width=8,
+        )
+        ent_sep.grid(
+            row=5, column=1, sticky="w", padx=8, pady=6
+        )
+        self.widgets["output.delimiter"] = ent_sep
+
+        self.vars["output.file_name_mode"] = tk.StringVar()
+        ttk.Label(fo, text="Nome do arquivo individual").grid(
+            row=6, column=0, sticky="w", padx=8, pady=6
+        )
+        cmb_file_name = ttk.Combobox(
+            fo,
+            textvariable=self.vars["output.file_name_mode"],
+            values=[
+                "Só número do documento",
+                "Número do documento + data",
+                "Número do documento + data + hora",
+            ],
+            state="readonly",
+            width=36,
+        )
+        cmb_file_name.grid(row=6, column=1, sticky="w", padx=8, pady=6)
+        self.widgets["output.file_name_mode"] = cmb_file_name
 
         # ---- Status / Logs
         self._build_status_tab()
@@ -632,6 +699,30 @@ class ConfigUI(tk.Tk):
         self.vars["app.status_inicial"].set(g("app", "status_inicial", "PEN"))
         self.vars["app.group_items"].set(as_bool(g("app", "group_items", "no")))
 
+        # Arquivos de Saída
+        self.vars["output.output_dir"].set(g("output", "output_dir", r"C:\MIS\saida"))
+        labels = {
+            "codigo": "Código interno",
+            "gtin": "GTIN / EAN",
+            "ambos": "Código interno + GTIN / EAN",
+        }
+        modo = g("output", "product_id", "ambos").strip().lower()
+        self.vars["output.product_id"].set(labels.get(modo, labels["ambos"]))
+        self.vars["output.include_numdoc"].set(as_bool(g("output", "include_numdoc", "yes")))
+        self.vars["output.individual_file"].set(as_bool(g("output", "individual_file", "yes")))
+        self.vars["output.daily_file"].set(as_bool(g("output", "daily_file", "yes")))
+        self.vars["output.delimiter"].set(g("output", "delimiter", ";"))
+
+        file_name_labels = {
+            "numdoc": "Só número do documento",
+            "numdoc_data": "Número do documento + data",
+            "numdoc_data_hora": "Número do documento + data + hora",
+        }
+        modo_nome = g("output", "file_name_mode", "numdoc_data_hora").strip().lower()
+        self.vars["output.file_name_mode"].set(
+            file_name_labels.get(modo_nome, file_name_labels["numdoc_data_hora"])
+        )
+
     def _apply_states(self):
         trusted = self.vars["sql.trusted_connection"].get()
         self.widgets["sql.user"].configure(state=("disabled" if trusted else "normal"))
@@ -683,6 +774,33 @@ class ConfigUI(tk.Tk):
         setv("logging", "log_dir", self.vars["logging.log_dir"].get().strip())
         setv("logging", "level", self.vars["logging.level"].get().strip().upper())
 
+        # Arquivos de Saída
+        modos = {
+            "Código interno": "codigo",
+            "GTIN / EAN": "gtin",
+            "Código interno + GTIN / EAN": "ambos",
+        }
+        setv("output", "output_dir", self.vars["output.output_dir"].get().strip())
+        setv("output", "product_id", modos.get(self.vars["output.product_id"].get(), "ambos"))
+        setv("output", "include_numdoc", bool_to_ini(self.vars["output.include_numdoc"].get()))
+        setv("output", "individual_file", bool_to_ini(self.vars["output.individual_file"].get()))
+        setv("output", "daily_file", bool_to_ini(self.vars["output.daily_file"].get()))
+        setv("output", "delimiter", self.vars["output.delimiter"].get() or ";")
+
+        modos_nome = {
+            "Só número do documento": "numdoc",
+            "Número do documento + data": "numdoc_data",
+            "Número do documento + data + hora": "numdoc_data_hora",
+        }
+        setv(
+            "output",
+            "file_name_mode",
+            modos_nome.get(
+                self.vars["output.file_name_mode"].get(),
+                "numdoc_data_hora",
+            ),
+        )
+
     def _test_connection(self):
         try:
             self._write_from_form()
@@ -707,6 +825,7 @@ class ConfigUI(tk.Tk):
                 ("watch", "error_dir"),
                 ("watch", "duplicate_dir"),
                 ("logging", "log_dir"),
+                ("output", "output_dir"),
             ):
                 p = self.cfg.get(sec, opt, fallback="").strip()
                 if p:

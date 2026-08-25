@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+from datetime import datetime
+import logging
+import os
 
 from .db import get_connection
 
@@ -205,6 +208,139 @@ def _update_prodconf(cur, reg, coletor_id: str = ""):
         )
 
 
+
+def _saldo_exatamente_zero(valor) -> bool:
+    if valor is None:
+        return False
+    try:
+        return Decimal(str(valor)) == Decimal("0")
+    except Exception:
+        return False
+
+
+def _nome_arquivo_individual(num_doc: str, modo: str) -> str:
+    agora = datetime.now()
+    num_doc = _texto(num_doc)
+
+    if modo == "numdoc":
+        return f"{num_doc}.txt"
+    if modo == "numdoc_data":
+        return f"{num_doc}_{agora.strftime('%d%m%Y')}.txt"
+
+    return f"{num_doc}_{agora.strftime('%d%m%Y_%H%M%S')}.txt"
+
+
+def _gerar_arquivo_individual_se_concluido(conn, settings, num_doc: str):
+    if not getattr(settings, "output", None):
+        return None
+
+    if not settings.output.individual_file:
+        return None
+
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT TOP 1 StatusConf
+        FROM dbo.logConf
+        WHERE CAST(NumNF AS VARCHAR(50)) = ?
+        """,
+        (str(num_doc),),
+    )
+    row_status = cur.fetchone()
+
+    if row_status is None:
+        logging.info(
+            f"[SAIDA INDIVIDUAL NAO GERADA] NumDoc={num_doc} | "
+            f"Motivo=LOGCONF não encontrado."
+        )
+        return None
+
+    status_conf = _texto(row_status.StatusConf).upper()
+    if status_conf != "CONFERIDO":
+        logging.info(
+            f"[SAIDA INDIVIDUAL NAO GERADA] NumDoc={num_doc} | "
+            f"Motivo=StatusConf={status_conf or 'VAZIO'}."
+        )
+        return None
+
+    cur.execute(
+        """
+        SELECT CodProd, GTIN, QtdeLido, Saldo
+        FROM dbo.prodConf
+        WHERE CAST(NumDoc AS VARCHAR(50)) = ?
+        """,
+        (str(num_doc),),
+    )
+    itens = cur.fetchall()
+
+    if not itens:
+        logging.info(
+            f"[SAIDA INDIVIDUAL NAO GERADA] NumDoc={num_doc} | "
+            f"Motivo=nenhum item em PRODCONF."
+        )
+        return None
+
+    if any(not _saldo_exatamente_zero(item.Saldo) for item in itens):
+        logging.info(
+            f"[SAIDA INDIVIDUAL NAO GERADA] NumDoc={num_doc} | "
+            f"Motivo=existe Saldo NULL/vazio ou diferente de zero."
+        )
+        return None
+
+    output_dir = _texto(settings.output.output_dir) or r"C:\MIS\saida"
+    os.makedirs(output_dir, exist_ok=True)
+
+    delimitador = settings.output.delimiter or ";"
+    modo_id = _texto(settings.output.product_id).lower()
+    if modo_id not in ("codigo", "gtin", "ambos"):
+        modo_id = "ambos"
+
+    incluir_numdoc = bool(settings.output.include_numdoc)
+    linhas = []
+
+    for item in itens:
+        cod = _texto(item.CodProd)
+        gtin = _texto(item.GTIN)
+        qtde = _numero_normalizado(item.QtdeLido)
+
+        if cod and gtin and cod == gtin:
+            gtin = ""
+
+        campos = []
+        if incluir_numdoc:
+            campos.append(str(num_doc))
+
+        if modo_id == "codigo":
+            campos.append(cod)
+        elif modo_id == "gtin":
+            campos.append(gtin or cod)
+        else:
+            campos.extend([cod, gtin])
+
+        campos.append(qtde)
+        linhas.append(delimitador.join(campos))
+
+    nome = _nome_arquivo_individual(
+        str(num_doc),
+        _texto(settings.output.file_name_mode).lower(),
+    )
+    destino = os.path.join(output_dir, nome)
+    temporario = destino + ".tmp"
+
+    with open(temporario, "w", encoding="utf-8", newline="") as f:
+        for linha in linhas:
+            f.write(linha + "\n")
+
+    os.replace(temporario, destino)
+
+    logging.info(
+        f"[SAIDA INDIVIDUAL GERADA] NumDoc={num_doc} | "
+        f"Itens={len(linhas)} | Arquivo={destino}"
+    )
+    return destino
+
+
 def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf, coletor_id: str = "") -> ResultadoGravacao:
     conn = get_connection(settings.sql)
     resultado = ResultadoGravacao()
@@ -249,7 +385,8 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf, colet
                        UserFimConf = ?,
                        HoraIniConf = ?,
                        HoraFimConf = ?,
-                       StatusConf = ?
+                       StatusConf = ?,
+                       ColetorID = ?
                  WHERE NumNF = ?
                 """,
                 (
@@ -338,6 +475,14 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf, colet
                 )
 
         conn.commit()
+
+        for item in logconf:
+            _gerar_arquivo_individual_se_concluido(
+                conn,
+                settings,
+                item["num_nf"],
+            )
+
         return resultado
 
     except Exception:

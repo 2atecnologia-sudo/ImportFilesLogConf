@@ -60,12 +60,24 @@ class LoggingSettings:
 
 
 @dataclass(frozen=True)
+class OutputSettings:
+    output_dir: str
+    product_id: str          # "codigo", "gtin" ou "ambos"
+    include_numdoc: bool
+    individual_file: bool
+    daily_file: bool
+    delimiter: str
+    file_name_mode: str      # "numdoc", "numdoc_data" ou "numdoc_data_hora"
+
+
+@dataclass(frozen=True)
 class Settings:
     sql: SqlSettings
     watch: WatchSettings
     txt: TxtSettings
     app: AppSettings
     logging: LoggingSettings
+    output: OutputSettings
 
 
 def load_settings() -> Settings:
@@ -115,4 +127,33 @@ def load_settings() -> Settings:
         level=cfg.get("logging", "level", fallback="INFO").strip().upper(),
     )
 
-    return Settings(sql=sql, watch=watch, txt=txt, app=app, logging=logging)
+    product_id = cfg.get("output", "product_id", fallback="ambos").strip().lower()
+    if product_id not in ("codigo", "gtin", "ambos"):
+        product_id = "ambos"
+
+    file_name_mode = cfg.get(
+        "output",
+        "file_name_mode",
+        fallback="numdoc_data_hora",
+    ).strip().lower()
+    if file_name_mode not in ("numdoc", "numdoc_data", "numdoc_data_hora"):
+        file_name_mode = "numdoc_data_hora"
+
+    output = OutputSettings(
+        output_dir=cfg.get("output", "output_dir", fallback=r"C:\MIS\saida").strip(),
+        product_id=product_id,
+        include_numdoc=as_bool(cfg.get("output", "include_numdoc", fallback="yes")),
+        individual_file=as_bool(cfg.get("output", "individual_file", fallback="yes")),
+        daily_file=as_bool(cfg.get("output", "daily_file", fallback="yes")),
+        delimiter=cfg.get("output", "delimiter", fallback=";") or ";",
+        file_name_mode=file_name_mode,
+    )
+
+    return Settings(
+        sql=sql,
+        watch=watch,
+        txt=txt,
+        app=app,
+        logging=logging,
+        output=output,
+    )
