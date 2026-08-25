@@ -266,7 +266,7 @@ def _gerar_arquivo_individual_se_concluido(conn, settings, num_doc: str):
 
     cur.execute(
         """
-        SELECT CodProd, GTIN, QtdeLido, Saldo
+        SELECT CodProd, GTIN, DescProd, QtdeDoc, QtdeLido, Saldo
         FROM dbo.prodConf
         WHERE CAST(NumDoc AS VARCHAR(50)) = ?
         """,
@@ -292,33 +292,70 @@ def _gerar_arquivo_individual_se_concluido(conn, settings, num_doc: str):
     os.makedirs(output_dir, exist_ok=True)
 
     delimitador = settings.output.delimiter or ";"
-    modo_id = _texto(settings.output.product_id).lower()
-    if modo_id not in ("codigo", "gtin", "ambos"):
-        modo_id = "ambos"
 
-    incluir_numdoc = bool(settings.output.include_numdoc)
+    export_numdoc = bool(settings.output.export_numdoc)
+    export_codigo = bool(settings.output.export_codigo)
+    export_gtin = bool(settings.output.export_gtin)
+    export_descricao = bool(settings.output.export_descricao)
+    export_qtdeesperada = bool(settings.output.export_qtdeesperada)
+    export_qtdelida = bool(settings.output.export_qtdelida)
+    export_saldo = bool(settings.output.export_saldo)
+
+    if not any((
+        export_numdoc,
+        export_codigo,
+        export_gtin,
+        export_descricao,
+        export_qtdeesperada,
+        export_qtdelida,
+        export_saldo,
+    )):
+        logging.warning(
+            f"[SAIDA INDIVIDUAL NAO GERADA] NumDoc={num_doc} | "
+            f"Motivo=nenhum campo selecionado para exportação."
+        )
+        return None
+
     linhas = []
 
     for item in itens:
         cod = _texto(item.CodProd)
         gtin = _texto(item.GTIN)
-        qtde = _numero_normalizado(item.QtdeLido)
+        descricao = _texto(item.DescProd)
+        qtde_esperada = _numero_normalizado(item.QtdeDoc)
+        qtde_lida = _numero_normalizado(item.QtdeLido)
+        saldo = _numero_normalizado(item.Saldo)
 
-        if cod and gtin and cod == gtin:
+        # Quando Código e GTIN forem iguais e ambos estiverem selecionados,
+        # o valor é gravado somente uma vez. Mantemos a coluna Código
+        # preenchida e deixamos a coluna GTIN vazia para preservar a
+        # posição das colunas do arquivo.
+        if export_codigo and export_gtin and cod and gtin and cod == gtin:
             gtin = ""
 
         campos = []
-        if incluir_numdoc:
+
+        if export_numdoc:
             campos.append(str(num_doc))
 
-        if modo_id == "codigo":
+        if export_codigo:
             campos.append(cod)
-        elif modo_id == "gtin":
-            campos.append(gtin or cod)
-        else:
-            campos.extend([cod, gtin])
 
-        campos.append(qtde)
+        if export_gtin:
+            campos.append(gtin)
+
+        if export_descricao:
+            campos.append(descricao)
+
+        if export_qtdeesperada:
+            campos.append(qtde_esperada)
+
+        if export_qtdelida:
+            campos.append(qtde_lida)
+
+        if export_saldo:
+            campos.append(saldo)
+
         linhas.append(delimitador.join(campos))
 
     nome = _nome_arquivo_individual(

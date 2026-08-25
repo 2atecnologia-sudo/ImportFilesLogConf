@@ -62,8 +62,13 @@ class LoggingSettings:
 @dataclass(frozen=True)
 class OutputSettings:
     output_dir: str
-    product_id: str          # "codigo", "gtin" ou "ambos"
-    include_numdoc: bool
+    export_numdoc: bool
+    export_codigo: bool
+    export_gtin: bool
+    export_descricao: bool
+    export_qtdeesperada: bool
+    export_qtdelida: bool
+    export_saldo: bool
     individual_file: bool
     daily_file: bool
     delimiter: str
@@ -127,9 +132,14 @@ def load_settings() -> Settings:
         level=cfg.get("logging", "level", fallback="INFO").strip().upper(),
     )
 
-    product_id = cfg.get("output", "product_id", fallback="ambos").strip().lower()
-    if product_id not in ("codigo", "gtin", "ambos"):
-        product_id = "ambos"
+    # Compatibilidade com config.ini de versões anteriores.
+    product_id_antigo = cfg.get("output", "product_id", fallback="ambos").strip().lower()
+    if product_id_antigo not in ("codigo", "gtin", "ambos"):
+        product_id_antigo = "ambos"
+
+    include_numdoc_antigo = as_bool(
+        cfg.get("output", "include_numdoc", fallback="yes")
+    )
 
     file_name_mode = cfg.get(
         "output",
@@ -141,8 +151,39 @@ def load_settings() -> Settings:
 
     output = OutputSettings(
         output_dir=cfg.get("output", "output_dir", fallback=r"C:\MIS\saida").strip(),
-        product_id=product_id,
-        include_numdoc=as_bool(cfg.get("output", "include_numdoc", fallback="yes")),
+        export_numdoc=as_bool(
+            cfg.get(
+                "output",
+                "export_numdoc",
+                fallback="yes" if include_numdoc_antigo else "no",
+            )
+        ),
+        export_codigo=as_bool(
+            cfg.get(
+                "output",
+                "export_codigo",
+                fallback="yes" if product_id_antigo in ("codigo", "ambos") else "no",
+            )
+        ),
+        export_gtin=as_bool(
+            cfg.get(
+                "output",
+                "export_gtin",
+                fallback="yes" if product_id_antigo in ("gtin", "ambos") else "no",
+            )
+        ),
+        export_descricao=as_bool(
+            cfg.get("output", "export_descricao", fallback="no")
+        ),
+        export_qtdeesperada=as_bool(
+            cfg.get("output", "export_qtdeesperada", fallback="no")
+        ),
+        export_qtdelida=as_bool(
+            cfg.get("output", "export_qtdelida", fallback="yes")
+        ),
+        export_saldo=as_bool(
+            cfg.get("output", "export_saldo", fallback="no")
+        ),
         individual_file=as_bool(cfg.get("output", "individual_file", fallback="yes")),
         daily_file=as_bool(cfg.get("output", "daily_file", fallback="yes")),
         delimiter=cfg.get("output", "delimiter", fallback=";") or ";",

@@ -207,22 +207,66 @@ class ConfigUI(tk.Tk):
 
         self._dir(fo, "Pasta de saída", "output.output_dir", 0)
 
-        self.vars["output.product_id"] = tk.StringVar()
-        ttk.Label(fo, text="Identificação do produto").grid(row=1, column=0, sticky="w", padx=8, pady=6)
-        cmb_output_id = ttk.Combobox(
-            fo,
-            textvariable=self.vars["output.product_id"],
-            values=["Código interno", "GTIN / EAN", "Código interno + GTIN / EAN"],
-            state="readonly",
-            width=32,
-        )
-        cmb_output_id.grid(row=1, column=1, sticky="w", padx=8, pady=6)
-        self.widgets["output.product_id"] = cmb_output_id
+        campos = ttk.LabelFrame(fo, text="Campos a exportar")
+        campos.grid(row=1, column=0, columnspan=3, sticky="ew", padx=8, pady=(8, 10))
 
-        self.vars["output.include_numdoc"] = tk.BooleanVar()
-        ttk.Checkbutton(fo, text="Incluir número do documento",
-                        variable=self.vars["output.include_numdoc"]).grid(
-            row=2, column=0, columnspan=3, sticky="w", padx=8, pady=6)
+        self.vars["output.export_numdoc"] = tk.BooleanVar()
+        self.vars["output.export_codigo"] = tk.BooleanVar()
+        self.vars["output.export_gtin"] = tk.BooleanVar()
+        self.vars["output.export_descricao"] = tk.BooleanVar()
+        self.vars["output.export_qtdeesperada"] = tk.BooleanVar()
+        self.vars["output.export_qtdelida"] = tk.BooleanVar()
+        self.vars["output.export_saldo"] = tk.BooleanVar()
+
+        ttk.Checkbutton(
+            campos,
+            text="NumDoc",
+            variable=self.vars["output.export_numdoc"],
+        ).grid(row=0, column=0, sticky="w", padx=10, pady=6)
+
+        ttk.Checkbutton(
+            campos,
+            text="Código interno",
+            variable=self.vars["output.export_codigo"],
+        ).grid(row=0, column=1, sticky="w", padx=10, pady=6)
+
+        ttk.Checkbutton(
+            campos,
+            text="GTIN / EAN",
+            variable=self.vars["output.export_gtin"],
+        ).grid(row=0, column=2, sticky="w", padx=10, pady=6)
+
+        ttk.Checkbutton(
+            campos,
+            text="Descrição",
+            variable=self.vars["output.export_descricao"],
+        ).grid(row=0, column=3, sticky="w", padx=10, pady=6)
+
+        ttk.Checkbutton(
+            campos,
+            text="Qtde Esperada",
+            variable=self.vars["output.export_qtdeesperada"],
+        ).grid(row=1, column=0, sticky="w", padx=10, pady=6)
+
+        ttk.Checkbutton(
+            campos,
+            text="Qtde Lida",
+            variable=self.vars["output.export_qtdelida"],
+        ).grid(row=1, column=1, sticky="w", padx=10, pady=6)
+
+        ttk.Checkbutton(
+            campos,
+            text="Saldo",
+            variable=self.vars["output.export_saldo"],
+        ).grid(row=1, column=2, sticky="w", padx=10, pady=6)
+
+        ttk.Label(
+            fo,
+            text=(
+                "Ordem das colunas: NumDoc, Código interno, GTIN/EAN, "
+                "Descrição, Qtde Esperada, Qtde Lida, Saldo."
+            ),
+        ).grid(row=2, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 8))
 
         self.vars["output.individual_file"] = tk.BooleanVar()
         ttk.Checkbutton(fo, text="Gerar arquivo individual por conferência",
@@ -701,14 +745,34 @@ class ConfigUI(tk.Tk):
 
         # Arquivos de Saída
         self.vars["output.output_dir"].set(g("output", "output_dir", r"C:\MIS\saida"))
-        labels = {
-            "codigo": "Código interno",
-            "gtin": "GTIN / EAN",
-            "ambos": "Código interno + GTIN / EAN",
-        }
-        modo = g("output", "product_id", "ambos").strip().lower()
-        self.vars["output.product_id"].set(labels.get(modo, labels["ambos"]))
-        self.vars["output.include_numdoc"].set(as_bool(g("output", "include_numdoc", "yes")))
+
+        # Compatibilidade com configurações antigas:
+        # product_id=codigo/gtin/ambos e include_numdoc=yes/no.
+        modo_antigo = g("output", "product_id", "ambos").strip().lower()
+        incluir_numdoc_antigo = as_bool(g("output", "include_numdoc", "yes"))
+
+        self.vars["output.export_numdoc"].set(
+            as_bool(g("output", "export_numdoc", "yes" if incluir_numdoc_antigo else "no"))
+        )
+        self.vars["output.export_codigo"].set(
+            as_bool(g("output", "export_codigo", "yes" if modo_antigo in ("codigo", "ambos") else "no"))
+        )
+        self.vars["output.export_gtin"].set(
+            as_bool(g("output", "export_gtin", "yes" if modo_antigo in ("gtin", "ambos") else "no"))
+        )
+        self.vars["output.export_descricao"].set(
+            as_bool(g("output", "export_descricao", "no"))
+        )
+        self.vars["output.export_qtdeesperada"].set(
+            as_bool(g("output", "export_qtdeesperada", "no"))
+        )
+        self.vars["output.export_qtdelida"].set(
+            as_bool(g("output", "export_qtdelida", "yes"))
+        )
+        self.vars["output.export_saldo"].set(
+            as_bool(g("output", "export_saldo", "no"))
+        )
+
         self.vars["output.individual_file"].set(as_bool(g("output", "individual_file", "yes")))
         self.vars["output.daily_file"].set(as_bool(g("output", "daily_file", "yes")))
         self.vars["output.delimiter"].set(g("output", "delimiter", ";"))
@@ -775,14 +839,14 @@ class ConfigUI(tk.Tk):
         setv("logging", "level", self.vars["logging.level"].get().strip().upper())
 
         # Arquivos de Saída
-        modos = {
-            "Código interno": "codigo",
-            "GTIN / EAN": "gtin",
-            "Código interno + GTIN / EAN": "ambos",
-        }
         setv("output", "output_dir", self.vars["output.output_dir"].get().strip())
-        setv("output", "product_id", modos.get(self.vars["output.product_id"].get(), "ambos"))
-        setv("output", "include_numdoc", bool_to_ini(self.vars["output.include_numdoc"].get()))
+        setv("output", "export_numdoc", bool_to_ini(self.vars["output.export_numdoc"].get()))
+        setv("output", "export_codigo", bool_to_ini(self.vars["output.export_codigo"].get()))
+        setv("output", "export_gtin", bool_to_ini(self.vars["output.export_gtin"].get()))
+        setv("output", "export_descricao", bool_to_ini(self.vars["output.export_descricao"].get()))
+        setv("output", "export_qtdeesperada", bool_to_ini(self.vars["output.export_qtdeesperada"].get()))
+        setv("output", "export_qtdelida", bool_to_ini(self.vars["output.export_qtdelida"].get()))
+        setv("output", "export_saldo", bool_to_ini(self.vars["output.export_saldo"].get()))
         setv("output", "individual_file", bool_to_ini(self.vars["output.individual_file"].get()))
         setv("output", "daily_file", bool_to_ini(self.vars["output.daily_file"].get()))
         setv("output", "delimiter", self.vars["output.delimiter"].get() or ";")
