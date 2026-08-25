@@ -507,6 +507,69 @@ def open_xml_downloader(icon, item=None):
         )
 
 
+
+def open_sefaz_manual(icon, item=None):
+    """
+    Abre a interface do SEFAZ Downloader em modo manual.
+
+    - Empacotado: abre SefazDownloader.exe na mesma pasta do Tray.
+    - Desenvolvimento: abre external/sefaz_downloader/main.py.
+    """
+    if getattr(sys, "frozen", False):
+        sefaz_exe = os.path.join(BASE_DIR, "SefazDownloader.exe")
+
+        if not os.path.exists(sefaz_exe):
+            _mostrar_mensagem(
+                APP_NAME,
+                f"SEFAZ Downloader não encontrado:\n{sefaz_exe}",
+                "error",
+            )
+            return
+
+        subprocess.Popen(
+            [sefaz_exe],
+            cwd=BASE_DIR,
+        )
+        return
+
+    sefaz_dir = os.path.join(
+        BASE_DIR,
+        "external",
+        "sefaz_downloader",
+    )
+
+    main_py = os.path.join(
+        sefaz_dir,
+        "main.py",
+    )
+
+    if not os.path.exists(main_py):
+        _mostrar_mensagem(
+            APP_NAME,
+            f"SEFAZ Downloader não encontrado:\n{main_py}",
+            "error",
+        )
+        return
+
+    creationflags = 0
+
+    if os.name == "nt":
+        creationflags = getattr(
+            subprocess,
+            "CREATE_NEW_PROCESS_GROUP",
+            0,
+        )
+
+    subprocess.Popen(
+        [
+            sys.executable,
+            main_py,
+        ],
+        cwd=sefaz_dir,
+        creationflags=creationflags,
+    )
+
+
 def quit_all(icon, item=None):
     """
     Encerra o Importer e toda a sua árvore de processos antes de fechar o Tray.
@@ -563,6 +626,11 @@ def run_tray():
         pystray.MenuItem(
             "Configuração",
             open_config
+        ),
+
+        pystray.MenuItem(
+            "Abrir SEFAZ Downloader (Manual)",
+            open_sefaz_manual
         ),
 
         pystray.MenuItem(
