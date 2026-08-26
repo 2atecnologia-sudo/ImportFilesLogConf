@@ -88,8 +88,16 @@ class ConfigUI(tk.Tk):
     def __init__(self, initial_tab="config"):
         super().__init__()
         self.title("ImportFiles LogConf")
-        self.geometry("900x650")
-        self.minsize(900, 650)
+
+        # Janela mais compacta e centralizada na tela.
+        window_width = 900
+        window_height = 540
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        pos_x = max(0, (screen_width - window_width) // 2)
+        pos_y = max(0, (screen_height - window_height) // 2)
+        self.geometry(f"{window_width}x{window_height}+{pos_x}+{pos_y}")
+        self.minsize(900, 540)
         self.resizable(True, True)
 
         self.initial_tab = initial_tab

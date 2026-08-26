@@ -12,7 +12,7 @@ _FILE_PATTERN = re.compile(
 )
 
 _SCANOCOR_PATTERN = re.compile(
-    r"^(.+?)_ScanOcor-(.+?)\.txt$",
+    r"^ScanOcor-(.+?)\.txt$",
     re.IGNORECASE,
 )
 
@@ -30,10 +30,13 @@ def identificar_arquivo(file_path: str) -> Optional[InputFileInfo]:
     nome = os.path.basename(file_path)
 
     scan_match = _SCANOCOR_PATTERN.match(nome)
+
     if scan_match:
-        coletor_id = scan_match.group(2).strip()
+        coletor_id = scan_match.group(1).strip()
+
         if not coletor_id:
             return None
+
         return InputFileInfo(
             tipo="scanocor",
             coletor_id=coletor_id,
@@ -96,6 +99,7 @@ def localizar_par_sync(
 
         if info.tipo == "logconf" and not info.confirmado:
             logconf = caminho
+
         elif info.tipo == "confprod" and not info.confirmado:
             confprod = caminho
 
