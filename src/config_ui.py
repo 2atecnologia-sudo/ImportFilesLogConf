@@ -16,6 +16,9 @@ if getattr(sys, "frozen", False):
 else:
     BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
+APP_VERSION = "1.0.1"
+BUILD_DATE = "27/08/2026 11:23"
+
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
 EXAMPLE_PATH = os.path.join(BASE_DIR, "config.ini.example")
 
@@ -87,7 +90,15 @@ def build_conn_str(cfg: configparser.ConfigParser) -> str:
 class ConfigUI(tk.Tk):
     def __init__(self, initial_tab="config"):
         super().__init__()
-        self.title("ImportFiles LogConf")
+        self.title("Gestor de Dados - 2A Tecnologia")
+
+        # Ícone da janela. Salvar como assets/gestor_dados_icon.png
+        try:
+            icon_path = resource_path(os.path.join("assets", "gestor_dados_icon.png"))
+            self._window_icon = tk.PhotoImage(file=icon_path)
+            self.iconphoto(True, self._window_icon)
+        except Exception:
+            pass
 
         # Janela mais compacta e centralizada na tela.
         window_width = 900
@@ -375,7 +386,7 @@ class ConfigUI(tk.Tk):
             justify="left",
         ).pack(anchor="w", padx=10, pady=8)
 
-        logs = ttk.LabelFrame(self.tab_status, text="Eventos recentes")
+        logs = ttk.LabelFrame(self.tab_status, text="Eventos recentes para o usuário")
         logs.pack(fill="both", expand=True, padx=10, pady=6)
 
         self.log_text = tk.Text(
@@ -409,7 +420,7 @@ class ConfigUI(tk.Tk):
 
         ttk.Button(
             actions,
-            text="Abrir pasta de logs",
+            text="Abrir log do usuário",
             command=self._open_log_dir,
         ).pack(side="left", padx=(8, 0))
 
@@ -456,7 +467,7 @@ class ConfigUI(tk.Tk):
 
         ttk.Label(
             title_row,
-            text="Versão 1.0.0",
+            text=f"Versão {APP_VERSION} | Build {BUILD_DATE}",
             font=("Segoe UI", 11),
         ).pack(side="left")
 
@@ -538,9 +549,13 @@ class ConfigUI(tk.Tk):
         ).pack(anchor="w")
 
     def _select_initial_tab(self):
-        if str(self.initial_tab).lower() == "status":
+        initial = str(self.initial_tab).strip().lower()
+        if initial == "status":
             self.nb.select(self.tab_status)
             self._refresh_status_tab()
+        elif initial == "about":
+            self.nb.select(self.tab_about)
+            self.update_idletasks()
         else:
             self.nb.select(0)
 
@@ -585,55 +600,56 @@ class ConfigUI(tk.Tk):
             "log_dir",
             fallback=os.path.join(BASE_DIR, "logs"),
         ).strip()
-        return os.path.join(log_dir, "importador.log")
+        return os.path.join(log_dir, "usuario.log")
 
-    def _read_recent_events(self, max_lines=120):
+    def _read_recent_events(self, max_lines=160):
         log_path = self._get_log_path()
 
         if not os.path.isfile(log_path):
-            return ["Nenhum log encontrado ainda."]
+            return ["Nenhum evento para o usuário registrado ainda."]
 
         try:
             with open(log_path, "r", encoding="utf-8", errors="replace") as f:
-                lines = f.readlines()
+                linhas = [line.rstrip("\n") for line in f.readlines()]
 
-            interesting = []
-            keywords = (
-                "[ARQUIVO]",
-                "[SYNC PENDENTE]",
-                "[SYNC PAR DETECTADO]",
-                "[SYNC][LOGCONF]",
-                "[SYNC][PRODCONF]",
-                "[SYNC VALIDACAO CONCLUIDA]",
-                "[SIMULACAO][LOGCONF]",
-                "[SIMULACAO][PRODCONF]",
-                "[PREFLIGHT OK]",
-                "[SYNC GRAVACAO OK]",
-                "[SYNC ARQUIVOS PROCESSADOS]",
-                "[SYNC][SQL PENDENTE]",
-                "[SYNC ABORTADA]",
-                "[REPROCESSAMENTO AUTOMATICO]",
-                "Iniciando importador",
-            )
+            # usuario.log é gravado em blocos separados por linha em branco.
+            # Mantemos o arquivo original intacto e apenas invertemos os blocos
+            # para mostrar o evento mais recente no topo da interface.
+            blocos = []
+            bloco_atual = []
 
-            for line in lines:
-                if any(k in line for k in keywords):
-                    interesting.append(line.rstrip())
+            for linha in linhas:
+                if linha.strip():
+                    bloco_atual.append(linha)
+                elif bloco_atual:
+                    blocos.append(bloco_atual)
+                    bloco_atual = []
 
-            return interesting[-max_lines:] or ["Nenhum evento relevante encontrado."]
+            if bloco_atual:
+                blocos.append(bloco_atual)
+
+            blocos.reverse()
+
+            resultado = []
+            for bloco in blocos:
+                resultado.extend(bloco)
+                resultado.append("")
+
+                if len(resultado) >= max_lines:
+                    break
+
+            return resultado[:max_lines] or ["Nenhum evento para o usuário registrado ainda."]
+
         except Exception as e:
-            return [f"Erro ao ler log: {e}"]
+            return [f"Não foi possível ler o log do usuário: {e}"]
 
     def _last_result_from_log(self) -> str:
         lines = self._read_recent_events(max_lines=80)
-
         for line in reversed(lines):
-            if "[SYNC GRAVACAO OK]" in line:
-                return "Processamento concluído com COMMIT OK"
-            if "[SYNC][SQL PENDENTE]" in line:
-                return "SQL indisponível - arquivos preservados"
-            if "[SYNC ABORTADA]" in line:
-                return "Sincronização abortada - verificar log"
+            if " | " in line:
+                partes = line.split(" | ", 2)
+                if len(partes) == 3 and partes[1] in ("OK", "ERRO", "ATENÇÃO", "INFO"):
+                    return partes[2]
         return "-"
 
     def _refresh_status_tab(self):
@@ -675,7 +691,7 @@ class ConfigUI(tk.Tk):
         self.log_text.configure(state="normal")
         self.log_text.delete("1.0", "end")
         self.log_text.insert("1.0", "\n".join(events))
-        self.log_text.see("end")
+        self.log_text.see("1.0")
         self.log_text.configure(state="disabled")
 
     def _status_auto_refresh(self):
@@ -694,9 +710,14 @@ class ConfigUI(tk.Tk):
             fallback=os.path.join(BASE_DIR, "logs"),
         ).strip()
         os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, "usuario.log")
+
+        if not os.path.exists(log_path):
+            with open(log_path, "a", encoding="utf-8"):
+                pass
 
         if os.name == "nt":
-            os.startfile(log_dir)
+            os.startfile(log_path)
 
     def _entry(self, parent, label, key, row, show=None):
         self.vars[key] = tk.StringVar()

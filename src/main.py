@@ -22,6 +22,7 @@ from .sync_apply import aplicar_sincronizacao, aplicar_scanocor, SyncWriteError
 from .sql_diagnostics import diagnosticar_erro_sql
 from .runtime_status import write_runtime_status
 from .single_instance import SingleInstance
+from .user_log import registrar_evento_usuario
 
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -366,6 +367,15 @@ def _process_file_impl(file_path: str, settings):
                 f"Arquivo={info.nome_arquivo} | "
                 f"SQL processado. Arquivo mantido em entrada aguardando .ok."
             )
+            registrar_evento_usuario(
+                settings,
+                nivel="OK",
+                titulo="NFLOG importado com sucesso",
+                onde=info.nome_arquivo,
+                porque="Novo NFLOG detectado na pasta de entrada.",
+                como_resolver="Nenhuma ação necessária. O arquivo ficará aguardando a confirmação .ok do coletor.",
+                detalhe=f"Coletor: {info.coletor_id}",
+            )
             return
 
         logging.info(
@@ -561,6 +571,15 @@ def _process_file_impl(file_path: str, settings):
             f"Faltando={faltando} | "
             f"Nenhuma alteração realizada."
         )
+        registrar_evento_usuario(
+            settings,
+            nivel="ATENÇÃO",
+            titulo=f"Aguardando {faltando}",
+            onde=info.nome_arquivo,
+            porque=f"O arquivo correspondente {faltando} ainda não chegou.",
+            como_resolver="Aguarde o segundo arquivo do coletor. Nenhuma alteração foi feita no SQL Server.",
+            detalhe=f"Coletor: {info.coletor_id}",
+        )
         return
 
     if not wait_file_stable(logconf_path):
@@ -698,6 +717,25 @@ def _process_file_impl(file_path: str, settings):
             f"LOGCONF_Erros={resultado_logconf.registros_invalidos} | "
             f"PRODCONF_Erros={resultado_prodconf.registros_invalidos} | "
             f"Nenhuma alteração realizada. Arquivos preservados."
+        )
+        motivos = []
+        if not resultado_logconf.arquivo_valido:
+            motivos.append(f"LOGCONF: {resultado_logconf.erro_estrutural or 'estrutura inválida'}")
+        elif resultado_logconf.registros_invalidos:
+            motivos.append(f"LOGCONF possui {resultado_logconf.registros_invalidos} registro(s) inválido(s)")
+        if not resultado_prodconf.arquivo_valido:
+            motivos.append(f"PRODCONF: {resultado_prodconf.erro_estrutural or 'estrutura inválida'}")
+        elif resultado_prodconf.registros_invalidos:
+            motivos.append(f"PRODCONF possui {resultado_prodconf.registros_invalidos} registro(s) inválido(s)")
+
+        registrar_evento_usuario(
+            settings,
+            nivel="ERRO",
+            titulo="LOGCONF / PRODCONF não importados",
+            onde=f"{os.path.basename(logconf_path)} + {os.path.basename(confprod_path)}",
+            porque="; ".join(motivos) or "Falha na validação do conteúdo.",
+            como_resolver="Corrija o conteúdo indicado no coletor e gere novamente os arquivos.",
+            detalhe=f"Coletor: {info.coletor_id}. Nenhuma alteração foi feita no SQL Server.",
         )
         return
 
@@ -846,6 +884,19 @@ def _process_file_impl(file_path: str, settings):
                 "orientacao": "",
             },
         )
+        registrar_evento_usuario(
+            settings,
+            nivel="OK",
+            titulo="LOGCONF / PRODCONF importados",
+            onde=f"{os.path.basename(logconf_destino)} + {os.path.basename(prodconf_destino)}",
+            porque="Os arquivos passaram pela validação e foram aplicados ao SQL Server.",
+            como_resolver="Nenhuma ação necessária.",
+            detalhe=(
+                f"LOGCONF atualizados={gravacao.logconf_atualizados}; "
+                f"PRODCONF atualizados={gravacao.prodconf_atualizados}; "
+                f"Coletor={info.coletor_id}."
+            ),
+        )
 
     except SyncWriteError as e:
         logging.error(
@@ -973,6 +1024,15 @@ class Handler(FileSystemEventHandler):
             logging.exception(
                 f"Erro processando {file_path}: {e}"
             )
+            registrar_evento_usuario(
+                self.settings,
+                nivel="ERRO",
+                titulo="Arquivo não processado",
+                onde=os.path.basename(file_path),
+                porque=str(e),
+                como_resolver="Verifique o conteúdo do arquivo. Se necessário, consulte o log técnico.",
+                detalhe="O arquivo será movido para a pasta de erros quando possível.",
+            )
 
             try:
                 safe_move(
@@ -1040,6 +1100,19 @@ def _reiniciar_conferencias_se_necessario(settings):
             "orientacao": "",
         },
     )
+    registrar_evento_usuario(
+        settings,
+        nivel="ATENÇÃO",
+        titulo="Banco vazio",
+        onde="dbo.logConf + dbo.prodConf",
+        porque=(
+            "As duas tabelas estão vazias."
+            if qtd_logconf == 0 and qtd_prodconf == 0
+            else "Foi detectada inconsistência entre logConf e prodConf; a tabela remanescente foi zerada."
+        ),
+        como_resolver="Aguarde um NFLOG válido na pasta de entrada. O sistema reiniciará as conferências automaticamente.",
+        detalhe=f"logConf={qtd_logconf}; prodConf={qtd_prodconf}.",
+    )
     return True
 
 
@@ -1089,6 +1162,15 @@ def process_existing(settings):
                                     "mensagem": f"NFLOG importado normalmente. logConf={qtd_log}; prodConf={qtd_prod}.",
                                     "orientacao": "",
                                 },
+                            )
+                            registrar_evento_usuario(
+                                settings,
+                                nivel="OK",
+                                titulo="Banco zerado e reiniciado",
+                                onde="dbo.logConf + dbo.prodConf",
+                                porque="O banco estava vazio e havia um NFLOG válido disponível.",
+                                como_resolver="Nenhuma ação necessária. As conferências foram recriadas do zero.",
+                                detalhe=f"NFLOG={os.path.basename(path)}; logConf={qtd_log}; prodConf={qtd_prod}.",
                             )
                             banco_precisa_reconstruir = False
 
@@ -1168,6 +1250,15 @@ def _reprocessar_pendentes_automaticamente(settings):
                 f"Tipo={diagnostico['tipo']} | "
                 f"Codigo={diagnostico['codigo']} | "
                 f"Nova tentativa em {_RETRY_SQL_INTERVAL_SEC}s."
+            )
+            registrar_evento_usuario(
+                settings_atualizados,
+                nivel="ERRO",
+                titulo="SQL Server indisponível",
+                onde="Conexão com o banco configurado",
+                porque=diagnostico["titulo"],
+                como_resolver=diagnostico["orientacao"],
+                detalhe=f"Nova tentativa automática em {_RETRY_SQL_INTERVAL_SEC} segundos.",
             )
             return
 

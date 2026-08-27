@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import sys
 import time
@@ -17,6 +18,13 @@ from .single_instance import SingleInstance
 
 
 APP_NAME = "ImportFilesLogConf"
+try:
+    from .build_info import APP_VERSION, BUILD_DATE
+except Exception:
+    APP_VERSION = "1.0.2"
+    BUILD_DATE = "DESENVOLVIMENTO"
+
+VERSION_TEXT = f"Versão {APP_VERSION} | Build {BUILD_DATE}"
 
 # Em desenvolvimento: raiz do projeto.
 # Compilado pelo PyInstaller: pasta onde está o EXE.
@@ -103,21 +111,21 @@ def refresh(icon):
 
     if not importer_running():
         icon.icon = make_icon((128, 128, 128))
-        icon.title = f"{APP_NAME} - IMPORTADOR PARADO"
+        icon.title = f"{APP_NAME} - IMPORTADOR PARADO | {VERSION_TEXT}"
         return
 
     if status.get("estado") == "SQL_PENDENTE":
         titulo = status.get("titulo") or "SQL indisponível"
         icon.icon = make_icon((220, 38, 38))
-        icon.title = f"{APP_NAME} - ERRO: {titulo}"
+        icon.title = f"{APP_NAME} - ERRO: {titulo} | {VERSION_TEXT}"
         return
 
     icon.icon = make_icon((46, 160, 67))
 
     if status.get("estado") == "OK":
-        icon.title = f"{APP_NAME} - OPERANDO NORMALMENTE | SQL OK"
+        icon.title = f"{APP_NAME} - OPERANDO NORMALMENTE | SQL OK | {VERSION_TEXT}"
     else:
-        icon.title = f"{APP_NAME} - OPERANDO NORMALMENTE"
+        icon.title = f"{APP_NAME} - OPERANDO NORMALMENTE | {VERSION_TEXT}"
 
 
 def start_importer(icon, item=None):
@@ -128,7 +136,7 @@ def start_importer(icon, item=None):
         return
 
     icon.icon = make_icon((245, 158, 11))
-    icon.title = f"{APP_NAME} - INICIANDO..."
+    icon.title = f"{APP_NAME} - INICIANDO... | {VERSION_TEXT}"
 
     creationflags = 0
 
@@ -260,16 +268,103 @@ def show_status(icon, item=None):
     _abrir_configuracao(aba_status=True)
 
 
-def open_logs(icon, item=None):
-    log_dir = os.path.join(BASE_DIR, "logs")
+def _ler_blocos_log(caminho: str, tecnico: bool) -> list[list[str]]:
+    """
+    Lê o log em blocos preservando traceback/linhas auxiliares.
+    O arquivo original não é modificado.
+    """
+    if not os.path.isfile(caminho):
+        return []
 
-    os.makedirs(
-        log_dir,
-        exist_ok=True
+    with open(caminho, "r", encoding="utf-8", errors="replace") as f:
+        linhas = [linha.rstrip("\n") for linha in f]
+
+    if tecnico:
+        # Ex.: 2026-08-27 13:45:12,123 | INFO | ...
+        inicio_evento = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
+        blocos = []
+        atual = []
+
+        for linha in linhas:
+            if inicio_evento.match(linha):
+                if atual:
+                    blocos.append(atual)
+                atual = [linha]
+            else:
+                # Traceback e continuações pertencem ao evento anterior.
+                if atual:
+                    atual.append(linha)
+                elif linha.strip():
+                    atual = [linha]
+
+        if atual:
+            blocos.append(atual)
+
+        return blocos
+
+    # usuario.log: blocos separados por linha em branco.
+    blocos = []
+    atual = []
+
+    for linha in linhas:
+        if linha.strip():
+            atual.append(linha)
+        elif atual:
+            blocos.append(atual)
+            atual = []
+
+    if atual:
+        blocos.append(atual)
+
+    return blocos
+
+
+def _abrir_log_recente_primeiro(nome_original: str, nome_visualizacao: str, tecnico: bool):
+    s = load_settings()
+    log_dir = s.logging.log_dir
+    os.makedirs(log_dir, exist_ok=True)
+
+    original = os.path.join(log_dir, nome_original)
+    visualizacao = os.path.join(log_dir, nome_visualizacao)
+
+    if not os.path.exists(original):
+        with open(original, "a", encoding="utf-8"):
+            pass
+
+    try:
+        blocos = _ler_blocos_log(original, tecnico=tecnico)
+        blocos.reverse()
+
+        with open(visualizacao, "w", encoding="utf-8") as f:
+            if not blocos:
+                f.write("Nenhum registro encontrado.\n")
+            else:
+                for bloco in blocos:
+                    for linha in bloco:
+                        f.write(linha + "\n")
+                    f.write("\n")
+
+        os.startfile(visualizacao)
+
+    except Exception:
+        # Se a visualização falhar, abre o log original para nunca impedir acesso.
+        os.startfile(original)
+
+
+def open_user_log(icon, item=None):
+    _abrir_log_recente_primeiro(
+        "usuario.log",
+        "usuario_recente_primeiro.log",
+        tecnico=False,
     )
 
-    os.startfile(log_dir)
 
+def open_technical_log(icon, item=None):
+    _abrir_log_recente_primeiro(
+        "importador.log",
+        "importador_recente_primeiro.log",
+        tecnico=True,
+    )
 
 def open_input_folder(icon, item=None):
     s = load_settings()
@@ -289,6 +384,8 @@ def _texto_status():
     runtime = read_runtime_status(BASE_DIR)
 
     linhas = [
+        VERSION_TEXT,
+        "",
         f"Importador: {'RODANDO' if importer_running() else 'PARADO'}",
         f"Formato: {s.app.input_format}",
         f"Pasta entrada: {s.watch.input_dir}",
@@ -570,6 +667,19 @@ def open_sefaz_manual(icon, item=None):
     )
 
 
+
+def show_about(icon, item=None):
+    """Abre a Configuração diretamente na aba Sobre."""
+    if getattr(sys, "frozen", False):
+        exe = os.path.join(BASE_DIR, "ImportFilesLogConfConfig.exe")
+        if not os.path.isfile(exe):
+            _mostrar_mensagem("Sobre", "ImportFilesLogConfConfig.exe não encontrado.", "error")
+            return
+        subprocess.Popen([exe, "--about"], cwd=BASE_DIR)
+    else:
+        subprocess.Popen([sys.executable, "-m", "src.config_ui", "--about"], cwd=BASE_DIR)
+
+
 def quit_all(icon, item=None):
     """
     Encerra o Importer e toda a sua árvore de processos antes de fechar o Tray.
@@ -599,16 +709,9 @@ def run_tray():
 
     menu = pystray.Menu(
         pystray.MenuItem(
-            "Abrir XML Downloader",
-            open_xml_downloader,
-            default=True
-        ),
-
-        pystray.Menu.SEPARATOR,
-
-        pystray.MenuItem(
             "Status",
-            show_status
+            show_status,
+            default=True
         ),
 
         pystray.MenuItem(
@@ -629,18 +732,18 @@ def run_tray():
         ),
 
         pystray.MenuItem(
-            "Abrir SEFAZ Downloader (Manual)",
-            open_sefaz_manual
-        ),
-
-        pystray.MenuItem(
             "Abrir pasta de entrada",
             open_input_folder
         ),
 
         pystray.MenuItem(
-            "Abrir logs",
-            open_logs
+            "Abrir log do usuário",
+            open_user_log
+        ),
+
+        pystray.MenuItem(
+            "Abrir log técnico",
+            open_technical_log
         ),
 
         pystray.Menu.SEPARATOR,
@@ -664,6 +767,32 @@ def run_tray():
 
         pystray.Menu.SEPARATOR,
 
+        # XML Downloader / SEFAZ agrupados na parte inferior.
+        pystray.MenuItem(
+            "Abrir XML Downloader",
+            open_xml_downloader
+        ),
+
+        pystray.MenuItem(
+            "Abrir SEFAZ Downloader (Manual)",
+            open_sefaz_manual
+        ),
+
+        pystray.Menu.SEPARATOR,
+
+        pystray.MenuItem(
+            "Sobre",
+            show_about
+        ),
+
+        pystray.MenuItem(
+            VERSION_TEXT,
+            lambda icon, item: None,
+            enabled=False
+        ),
+
+        pystray.Menu.SEPARATOR,
+
         pystray.MenuItem(
             "Sair",
             quit_all
@@ -673,7 +802,7 @@ def run_tray():
     icon = pystray.Icon(
         APP_NAME,
         make_icon((128, 128, 128)),
-        f"{APP_NAME} - INICIANDO",
+        f"{APP_NAME} - INICIANDO | {VERSION_TEXT}",
         menu
     )
 
