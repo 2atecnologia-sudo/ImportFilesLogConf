@@ -3,6 +3,7 @@ import shutil
 import configparser
 import subprocess
 import sys
+import uuid
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -140,6 +141,7 @@ class ConfigUI(tk.Tk):
         tab_app = ttk.Frame(self.nb)
         tab_output = ttk.Frame(self.nb)
         tab_connector = ttk.Frame(self.nb)
+        self.tab_connector = tab_connector
         self.tab_status = ttk.Frame(self.nb)
 
         self.nb.add(tab_sql, text="Banco Local logConf")
@@ -335,63 +337,138 @@ class ConfigUI(tk.Tk):
         cmb_file_name.grid(row=6, column=1, sticky="w", padx=8, pady=6)
         self.widgets["output.file_name_mode"] = cmb_file_name
 
-        # ---- Conector de Banco de Dados - Etapa 1
-        fc = ttk.LabelFrame(tab_connector, text="Integração com banco de dados do cliente")
-        fc.pack(fill="x", padx=10, pady=10)
-
-        self.vars["connector.type"] = tk.StringVar()
-        ttk.Label(fc, text="Tipo de banco").grid(
-            row=0, column=0, sticky="w", padx=8, pady=6
-        )
-        cmb_connector_type = ttk.Combobox(
-            fc,
-            textvariable=self.vars["connector.type"],
-            values=[
-                "Microsoft SQL Server",
-                "PostgreSQL (em breve)",
-                "MySQL / MariaDB (em breve)",
-                "Oracle (em breve)",
-                "SAP HANA (em breve)",
-                "ODBC genérico (em breve)",
-                "OLE DB (em breve)",
-            ],
-            state="readonly",
-            width=38,
-        )
-        cmb_connector_type.grid(row=0, column=1, sticky="w", padx=8, pady=6)
-        self.widgets["connector.type"] = cmb_connector_type
-
-        self._entry(fc, "Driver ODBC", "connector.driver", 1)
-        self._entry(fc, "Servidor (IP ou HOST\\INSTÂNCIA)", "connector.server", 2)
-        self._entry(fc, "Banco", "connector.database", 3)
-
-        self.vars["connector.trusted_connection"] = tk.BooleanVar()
-        ttk.Checkbutton(
-            fc,
-            text="Usar autenticação do Windows (Trusted Connection)",
-            variable=self.vars["connector.trusted_connection"],
-            command=self._apply_states,
-        ).grid(row=4, column=0, columnspan=3, sticky="w", padx=8, pady=8)
-
-        self._entry(fc, "Usuário", "connector.user", 5)
-        self._entry(fc, "Senha", "connector.password", 6, show="*")
+        # ---- Conexões Externas - Etapa 2.4
+        # Mostra permanentemente a conexão atual.
+        # Nova conexão reinicia o assistente; Editar abre a conexão atual preenchida.
+        manager = ttk.LabelFrame(tab_connector, text="Conexão Externa Atual")
+        manager.pack(fill="both", expand=True, padx=10, pady=10)
 
         ttk.Label(
-            fc,
+            manager,
             text=(
-                "Etapa 1: somente conexão com o banco do cliente. "
-                "Nenhum dado será alterado."
+                "A conexão atualmente configurada é exibida abaixo. "
+                "Nenhum dado do ERP é alterado nesta etapa."
             ),
-        ).grid(row=7, column=0, columnspan=3, sticky="w", padx=8, pady=(8, 4))
+        ).grid(row=0, column=0, columnspan=3, sticky="w", padx=10, pady=(10, 10))
 
-        connector_actions = ttk.Frame(tab_connector)
-        connector_actions.pack(fill="x", padx=20, pady=(0, 10))
+        self.current_external_vars = {
+            "name": tk.StringVar(),
+            "type": tk.StringVar(),
+            "driver": tk.StringVar(),
+            "server": tk.StringVar(),
+            "port": tk.StringVar(),
+            "database": tk.StringVar(),
+            "auth": tk.StringVar(),
+            "user": tk.StringVar(),
+            "password": tk.StringVar(),
+            "status": tk.StringVar(),
+        }
+
+        labels = [
+            ("Nome da conexão", "name", 42),
+            ("Tipo de banco", "type", 34),
+            ("Driver ODBC", "driver", 42),
+            ("Servidor (IP ou HOST\\INSTÂNCIA)", "server", 42),
+            ("Porta", "port", 12),
+            ("Banco", "database", 36),
+            ("Autenticação", "auth", 34),
+            ("Usuário", "user", 30),
+            ("Senha", "password", 30),
+            ("Status", "status", 24),
+        ]
+
+        self.external_detail_widgets = []
+
+        for row, (label, key, field_width) in enumerate(labels, start=1):
+            lbl = ttk.Label(manager, text=label)
+            lbl.grid(row=row, column=0, sticky="w", padx=10, pady=5)
+
+            value_lbl = ttk.Label(
+                manager,
+                textvariable=self.current_external_vars[key],
+                relief="sunken",
+                anchor="w",
+                width=field_width,
+            )
+            value_lbl.grid(row=row, column=1, sticky="w", padx=10, pady=5)
+
+            self.external_detail_widgets.extend([lbl, value_lbl])
+
+        # Estado visual quando não existe conexão configurada.
+        self.external_empty_frame = ttk.Frame(manager)
+        self.external_empty_frame.grid(
+            row=1, column=0, columnspan=3, rowspan=10,
+            sticky="nsew", padx=10, pady=(18, 12)
+        )
+
+        ttk.Label(
+            self.external_empty_frame,
+            text="Nenhuma conexão externa configurada",
+            font=("Segoe UI", 13, "bold"),
+        ).pack(anchor="center", pady=(45, 10))
+
+        ttk.Label(
+            self.external_empty_frame,
+            text=(
+                "Clique em “Nova conexão” para iniciar o assistente e configurar "
+                "o banco de dados do ERP."
+            ),
+            justify="center",
+            font=("Segoe UI", 10),
+        ).pack(anchor="center", pady=(0, 8))
+
+        ttk.Label(
+            self.external_empty_frame,
+            text=(
+                "O Banco Local logConf continua funcionando normalmente "
+                "e não é alterado."
+            ),
+            justify="center",
+            font=("Segoe UI", 9),
+        ).pack(anchor="center")
+
+        connector_actions = ttk.Frame(manager)
+        connector_actions.grid(
+            row=12, column=0, columnspan=3, sticky="w", padx=10, pady=(16, 8)
+        )
 
         ttk.Button(
             connector_actions,
-            text="Testar conexão",
-            command=self._test_connector_connection,
+            text="Nova conexão",
+            command=self._new_external_connection,
         ).pack(side="left")
+
+        self.btn_external_edit = ttk.Button(
+            connector_actions,
+            text="Editar",
+            command=self._edit_external_connection,
+        )
+        self.btn_external_edit.pack(side="left", padx=(8, 0))
+
+        self.btn_external_delete = ttk.Button(
+            connector_actions,
+            text="Excluir",
+            command=self._delete_external_connection,
+        )
+        self.btn_external_delete.pack(side="left", padx=(8, 0))
+
+        self.btn_external_test = ttk.Button(
+            connector_actions,
+            text="Testar conexão",
+            command=self._test_selected_external_connection,
+        )
+        self.btn_external_test.pack(side="left", padx=(18, 0))
+
+        self.external_hint_var = tk.StringVar(
+            value=(
+                "Nova conexão abre o assistente vazio. Editar abre a conexão atual "
+                "com os dados preenchidos."
+            )
+        )
+        ttk.Label(
+            manager,
+            textvariable=self.external_hint_var,
+        ).grid(row=13, column=0, columnspan=3, sticky="w", padx=10, pady=(0, 10))
 
         # ---- Status / Logs
         self._build_status_tab()
@@ -896,28 +973,8 @@ class ConfigUI(tk.Tk):
 
         self.vars["sql.trusted_connection"].set(as_bool(g("sql", "trusted_connection", "no")))
 
-        # Conector de Banco de Dados do cliente
-        self.vars["connector.type"].set(
-            g("connector", "type", "Microsoft SQL Server")
-        )
-        self.vars["connector.driver"].set(
-            g("connector", "driver", "ODBC Driver 18 for SQL Server")
-        )
-        self.vars["connector.server"].set(
-            g("connector", "server", "")
-        )
-        self.vars["connector.database"].set(
-            g("connector", "database", "")
-        )
-        self.vars["connector.user"].set(
-            g("connector", "user", "")
-        )
-        self.vars["connector.password"].set(
-            g("connector", "password", "")
-        )
-        self.vars["connector.trusted_connection"].set(
-            as_bool(g("connector", "trusted_connection", "no"))
-        )
+        # Conexões externas (isoladas do Banco Local logConf)
+        self._load_external_connections()
 
         # Pastas
         self.vars["watch.input_dir"].set(g("watch", "input_dir", r"C:\MIS\entrada"))
@@ -989,14 +1046,6 @@ class ConfigUI(tk.Tk):
         self.widgets["sql.user"].configure(state=("disabled" if trusted else "normal"))
         self.widgets["sql.password"].configure(state=("disabled" if trusted else "normal"))
 
-        connector_trusted = self.vars["connector.trusted_connection"].get()
-        self.widgets["connector.user"].configure(
-            state=("disabled" if connector_trusted else "normal")
-        )
-        self.widgets["connector.password"].configure(
-            state=("disabled" if connector_trusted else "normal")
-        )
-
         fmt = (self.vars["input.format"].get() or "xml").strip().lower()
         txt_state = "normal" if fmt == "txt" else "disabled"
 
@@ -1017,19 +1066,6 @@ class ConfigUI(tk.Tk):
         setv("sql", "trusted_connection", bool_to_ini(self.vars["sql.trusted_connection"].get()))
         setv("sql", "user", self.vars["sql.user"].get().strip())
         setv("sql", "password", self.vars["sql.password"].get())
-
-        # Conector de Banco de Dados do cliente
-        setv("connector", "type", self.vars["connector.type"].get().strip())
-        setv("connector", "driver", self.vars["connector.driver"].get().strip())
-        setv("connector", "server", self.vars["connector.server"].get().strip())
-        setv("connector", "database", self.vars["connector.database"].get().strip())
-        setv(
-            "connector",
-            "trusted_connection",
-            bool_to_ini(self.vars["connector.trusted_connection"].get()),
-        )
-        setv("connector", "user", self.vars["connector.user"].get().strip())
-        setv("connector", "password", self.vars["connector.password"].get())
 
         # Pastas
         setv("watch", "input_dir", self.vars["watch.input_dir"].get().strip())
@@ -1083,75 +1119,581 @@ class ConfigUI(tk.Tk):
             ),
         )
 
-    def _test_connector_connection(self):
-        try:
-            tipo = self.vars["connector.type"].get().strip()
-            if tipo != "Microsoft SQL Server":
-                messagebox.showinfo(
-                    "Conector de Banco",
-                    "Nesta etapa, somente Microsoft SQL Server está disponível.",
+    def _reload_external_connections_from_disk(self):
+        """Recarrega somente as conexões externas salvas no config.ini."""
+        cfg_disco = load_cfg()
+
+        # Remove apenas as seções externas da cópia em memória.
+        for section in list(self.cfg.sections()):
+            if section.startswith("external_connection:"):
+                self.cfg.remove_section(section)
+
+        # Copia novamente do arquivo em disco.
+        for section in cfg_disco.sections():
+            if section.startswith("external_connection:"):
+                self.cfg[section] = dict(cfg_disco[section])
+
+        # Compatibilidade com a seção antiga [connector].
+        if cfg_disco.has_section("connector"):
+            if self.cfg.has_section("connector"):
+                self.cfg.remove_section("connector")
+            self.cfg["connector"] = dict(cfg_disco["connector"])
+
+        self._load_external_connections()
+
+
+    def _external_section_name(self, connection_id: str) -> str:
+        return f"external_connection:{connection_id}"
+
+
+    def _load_external_connections(self):
+        """Carrega somente as conexões externas para o gerenciador."""
+        if not hasattr(self, "current_external_vars"):
+            return
+
+        previous_current_external_id = getattr(self, "current_external_id", None)
+        self.external_connections = {}
+
+        # Compatibilidade: se já existia a seção [connector] da Etapa 1,
+        # ela aparece como uma conexão externa sem alterar o Banco Local logConf.
+        external_sections = [
+            section for section in self.cfg.sections()
+            if section.startswith("external_connection:")
+        ]
+
+        if not external_sections and self.cfg.has_section("connector"):
+            legacy_has_data = any(
+                self.cfg.get("connector", key, fallback="").strip()
+                for key in ("server", "database", "user")
+            )
+            if legacy_has_data:
+                connection_id = "legacy"
+                self.external_connections[connection_id] = {
+                    "id": connection_id,
+                    "name": self.cfg.get("connector", "name", fallback="ERP / Conexão externa").strip() or "ERP / Conexão externa",
+                    "type": self.cfg.get("connector", "type", fallback="Microsoft SQL Server").strip() or "Microsoft SQL Server",
+                    "driver": self.cfg.get("connector", "driver", fallback="ODBC Driver 18 for SQL Server").strip(),
+                    "server": self.cfg.get("connector", "server", fallback="").strip(),
+                    "port": self.cfg.get("connector", "port", fallback="1433").strip(),
+                    "database": self.cfg.get("connector", "database", fallback="").strip(),
+                    "trusted_connection": as_bool(self.cfg.get("connector", "trusted_connection", fallback="no")),
+                    "user": self.cfg.get("connector", "user", fallback="").strip(),
+                    "password": self.cfg.get("connector", "password", fallback=""),
+                    "status": "Não testado",
+                }
+
+        for section in external_sections:
+            connection_id = section.split(":", 1)[1]
+            self.external_connections[connection_id] = {
+                "id": connection_id,
+                "name": self.cfg.get(section, "name", fallback="Conexão externa").strip() or "Conexão externa",
+                "type": self.cfg.get(section, "type", fallback="Microsoft SQL Server").strip() or "Microsoft SQL Server",
+                "driver": self.cfg.get(section, "driver", fallback="ODBC Driver 18 for SQL Server").strip(),
+                "server": self.cfg.get(section, "server", fallback="").strip(),
+                "port": self.cfg.get(section, "port", fallback="1433").strip(),
+                "database": self.cfg.get(section, "database", fallback="").strip(),
+                "trusted_connection": as_bool(self.cfg.get(section, "trusted_connection", fallback="no")),
+                "user": self.cfg.get(section, "user", fallback="").strip(),
+                "password": self.cfg.get(section, "password", fallback=""),
+                "status": "Não testado",
+            }
+
+        if (
+            previous_current_external_id
+            and previous_current_external_id in self.external_connections
+        ):
+            self.current_external_id = previous_current_external_id
+        elif self.external_connections:
+            self.current_external_id = next(iter(self.external_connections))
+        else:
+            self.current_external_id = None
+
+        self._refresh_external_tree()
+
+
+    def _refresh_external_tree(self):
+        """Atualiza a exibição permanente da conexão externa atual."""
+        if not hasattr(self, "current_external_vars"):
+            return
+
+        # Mantém a conexão atual se ela ainda existir; caso contrário,
+        # usa a primeira conexão salva.
+        if (
+            not getattr(self, "current_external_id", None)
+            or self.current_external_id not in self.external_connections
+        ):
+            self.current_external_id = (
+                next(iter(self.external_connections), None)
+                if self.external_connections
+                else None
+            )
+
+        data = (
+            self.external_connections.get(self.current_external_id, {})
+            if self.current_external_id
+            else {}
+        )
+
+        trusted = bool(data.get("trusted_connection", False))
+        password = data.get("password", "")
+
+        values = {
+            "name": data.get("name", ""),
+            "type": data.get("type", ""),
+            "driver": data.get("driver", ""),
+            "server": data.get("server", ""),
+            "port": data.get("port", ""),
+            "database": data.get("database", ""),
+            "auth": (
+                "Windows (Trusted Connection)"
+                if trusted
+                else ("SQL Server (usuário e senha)" if data else "")
+            ),
+            "user": "" if trusted else data.get("user", ""),
+            "password": ("*" * len(password)) if password and not trusted else "",
+            "status": data.get("status", "Salvo") if data else "Nenhuma conexão cadastrada",
+        }
+
+        for key, value in values.items():
+            self.current_external_vars[key].set(value)
+
+        has_connection = bool(data)
+        button_state = "normal" if has_connection else "disabled"
+
+        if hasattr(self, "btn_external_edit"):
+            self.btn_external_edit.configure(state=button_state)
+        if hasattr(self, "btn_external_delete"):
+            self.btn_external_delete.configure(state=button_state)
+        if hasattr(self, "btn_external_test"):
+            self.btn_external_test.configure(state=button_state)
+
+        # Com conexão: mostra os dados.
+        # Sem conexão: esconde os campos vazios e mostra uma orientação clara.
+        if hasattr(self, "external_detail_widgets"):
+            for widget in self.external_detail_widgets:
+                if has_connection:
+                    widget.grid()
+                else:
+                    widget.grid_remove()
+
+        if hasattr(self, "external_empty_frame"):
+            if has_connection:
+                self.external_empty_frame.grid_remove()
+            else:
+                self.external_empty_frame.grid()
+
+        if hasattr(self, "external_hint_var"):
+            if has_connection:
+                self.external_hint_var.set(
+                    "Nova conexão abre o assistente vazio. Editar abre a conexão atual "
+                    "com os dados preenchidos."
                 )
-                return
+            else:
+                self.external_hint_var.set(
+                    "Nenhuma conexão configurada. Use “Nova conexão” para começar."
+                )
 
-            driver = self.vars["connector.driver"].get().strip()
-            server = self.vars["connector.server"].get().strip()
-            database = self.vars["connector.database"].get().strip()
-            trusted = self.vars["connector.trusted_connection"].get()
 
+    def _save_external_connections(self):
+        """Persiste apenas as conexões externas em seções próprias."""
+        for section in list(self.cfg.sections()):
+            if section.startswith("external_connection:"):
+                self.cfg.remove_section(section)
+
+        for connection_id, data in self.external_connections.items():
+            section = self._external_section_name(connection_id)
+            self.cfg[section] = {
+                "name": data.get("name", ""),
+                "type": data.get("type", "Microsoft SQL Server"),
+                "driver": data.get("driver", "ODBC Driver 18 for SQL Server"),
+                "server": data.get("server", ""),
+                "port": data.get("port", "1433"),
+                "database": data.get("database", ""),
+                "trusted_connection": bool_to_ini(bool(data.get("trusted_connection", False))),
+                "user": data.get("user", ""),
+                "password": data.get("password", ""),
+            }
+
+        save_cfg(self.cfg)
+
+
+    def _selected_external_id(self):
+        return getattr(self, "current_external_id", None)
+
+
+    def _new_external_connection(self):
+        self._open_external_connection_dialog()
+
+
+
+
+    def _edit_external_connection(self):
+        connection_id = self._selected_external_id()
+        if not connection_id:
+            messagebox.showinfo(
+                "Conexões Externas",
+                "Nenhuma conexão atual está cadastrada para editar.",
+            )
+            return
+
+        data = self.external_connections.get(connection_id)
+        if not data:
+            return
+
+        self._open_external_connection_dialog(connection_id, data)
+
+
+    def _delete_external_connection(self):
+        """Exclui a conexão externa atual e deixa a tela em estado sem conexão."""
+        connection_id = self._selected_external_id()
+        if not connection_id:
+            messagebox.showinfo(
+                "Conexões Externas",
+                "Nenhuma conexão externa está cadastrada.",
+                parent=self,
+            )
+            return
+
+        data = self.external_connections.get(connection_id, {})
+        connection_name = data.get("name", "Conexão atual")
+
+        if not messagebox.askyesno(
+            "Excluir conexão",
+            f'Deseja realmente excluir a conexão "{connection_name}"?',
+            parent=self,
+        ):
+            return
+
+        # Remove somente a conexão externa atual.
+        self.external_connections.pop(connection_id, None)
+
+        section = self._external_section_name(connection_id)
+        if self.cfg.has_section(section):
+            self.cfg.remove_section(section)
+
+        # Remove também a configuração antiga [connector] para impedir
+        # que uma conexão excluída reapareça ao reabrir a aplicação.
+        if self.cfg.has_section("connector"):
+            self.cfg.remove_section("connector")
+
+        save_cfg(self.cfg)
+
+        self.current_external_id = None
+        self.external_connections = {}
+        self._refresh_external_tree()
+        self.update_idletasks()
+
+        messagebox.showinfo(
+            "Conexões Externas",
+            "Conexão excluída com sucesso.",
+            parent=self,
+        )
+
+
+    def _open_external_connection_dialog(self, connection_id=None, initial=None):
+        initial = dict(initial or {})
+        editing = connection_id is not None
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Editar conexão externa" if editing else "Nova conexão externa")
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+
+        width = 700
+        height = 500
+        self.update_idletasks()
+        x = max(0, self.winfo_rootx() + (self.winfo_width() - width) // 2)
+        y = max(0, self.winfo_rooty() + (self.winfo_height() - height) // 2)
+        dlg.geometry(f"{width}x{height}+{x}+{y}")
+
+        frame = ttk.LabelFrame(dlg, text="Dados da conexão")
+        frame.pack(fill="both", expand=True, padx=12, pady=12)
+
+        vars_dlg = {
+            "name": tk.StringVar(value=initial.get("name", "")),
+            "type": tk.StringVar(value=initial.get("type", "Microsoft SQL Server")),
+            "driver": tk.StringVar(value=initial.get("driver", "ODBC Driver 18 for SQL Server")),
+            "server": tk.StringVar(value=initial.get("server", "")),
+            "port": tk.StringVar(value=initial.get("port", "1433")),
+            "database": tk.StringVar(value=initial.get("database", "")),
+            "trusted": tk.BooleanVar(value=bool(initial.get("trusted_connection", False))),
+            "user": tk.StringVar(value=initial.get("user", "")),
+            "password": tk.StringVar(value=initial.get("password", "")),
+        }
+
+        def add_label_entry(row, label, key, show=None):
+            ttk.Label(frame, text=label).grid(
+                row=row, column=0, sticky="w", padx=8, pady=6
+            )
+            entry = ttk.Entry(
+                frame,
+                textvariable=vars_dlg[key],
+                width=58,
+                show=show,
+            )
+            entry.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+            return entry
+
+        ent_name = add_label_entry(0, "Nome da conexão", "name")
+
+        ttk.Label(frame, text="Tipo de banco").grid(
+            row=1, column=0, sticky="w", padx=8, pady=6
+        )
+        cmb_type = ttk.Combobox(
+            frame,
+            textvariable=vars_dlg["type"],
+            values=[
+                "Microsoft SQL Server",
+                "PostgreSQL (em breve)",
+                "MySQL / MariaDB (em breve)",
+                "Oracle (em breve)",
+                "SAP HANA (em breve)",
+                "ODBC genérico (em breve)",
+                "OLE DB (em breve)",
+            ],
+            state="readonly",
+            width=55,
+        )
+        cmb_type.grid(row=1, column=1, sticky="ew", padx=8, pady=6)
+
+        ent_driver = add_label_entry(2, "Driver ODBC", "driver")
+        ent_server = add_label_entry(3, "Servidor (IP ou HOST\\INSTÂNCIA)", "server")
+        ent_port = add_label_entry(4, "Porta", "port")
+        ent_database = add_label_entry(5, "Banco", "database")
+
+        chk_trusted = ttk.Checkbutton(
+            frame,
+            text="Usar autenticação do Windows (Trusted Connection)",
+            variable=vars_dlg["trusted"],
+        )
+        chk_trusted.grid(
+            row=6, column=0, columnspan=2, sticky="w", padx=8, pady=8
+        )
+
+        ent_user = add_label_entry(7, "Usuário", "user")
+        ent_password = add_label_entry(8, "Senha", "password", show="*")
+
+        frame.grid_columnconfigure(1, weight=1)
+
+        def apply_auth_state():
+            state = "disabled" if vars_dlg["trusted"].get() else "normal"
+            ent_user.configure(state=state)
+            ent_password.configure(state=state)
+
+        chk_trusted.configure(command=apply_auth_state)
+        apply_auth_state()
+
+        info_var = tk.StringVar(
+            value="Nenhum dado será alterado. O teste executa somente uma consulta de identificação do banco."
+        )
+        ttk.Label(
+            frame,
+            textvariable=info_var,
+            wraplength=640,
+            justify="left",
+        ).grid(
+            row=9, column=0, columnspan=2, sticky="w", padx=8, pady=(10, 6)
+        )
+
+        buttons = ttk.Frame(dlg)
+        buttons.pack(fill="x", padx=12, pady=(0, 12))
+
+        def collect_data():
+            name = vars_dlg["name"].get().strip()
+            tipo = vars_dlg["type"].get().strip()
+            driver = vars_dlg["driver"].get().strip()
+            server = vars_dlg["server"].get().strip()
+            port = vars_dlg["port"].get().strip()
+            database = vars_dlg["database"].get().strip()
+            trusted = vars_dlg["trusted"].get()
+            user = vars_dlg["user"].get().strip()
+            password = vars_dlg["password"].get()
+
+            if not name:
+                raise ValueError("Informe um nome para a conexão.")
+            if tipo != "Microsoft SQL Server":
+                raise ValueError(
+                    "Nesta etapa, somente Microsoft SQL Server está disponível."
+                )
             if not driver:
                 raise ValueError("Informe o Driver ODBC.")
             if not server:
                 raise ValueError("Informe o servidor SQL Server.")
+            if port:
+                if not port.isdigit() or not (1 <= int(port) <= 65535):
+                    raise ValueError("Informe uma porta válida entre 1 e 65535.")
             if not database:
                 raise ValueError("Informe o banco de dados.")
+            if not trusted and not user:
+                raise ValueError("Informe o usuário do SQL Server.")
 
-            if trusted:
-                conn_str = (
-                    f"DRIVER={{{driver}}};"
-                    f"SERVER={server};"
-                    f"DATABASE={database};"
-                    "Trusted_Connection=yes;"
-                    "TrustServerCertificate=yes;"
+            return {
+                "name": name,
+                "type": tipo,
+                "driver": driver,
+                "server": server,
+                "port": port,
+                "database": database,
+                "trusted_connection": trusted,
+                "user": user,
+                "password": password,
+            }
+
+        def test_dialog_connection():
+            try:
+                data = collect_data()
+                banco_ok, servidor_ok = self._test_external_connection_data(data)
+                info_var.set(
+                    f"Conexão OK | Servidor: {servidor_ok} | Banco: {banco_ok} | Nenhum dado alterado."
                 )
-            else:
-                user = self.vars["connector.user"].get().strip()
-                password = self.vars["connector.password"].get()
-                if not user:
-                    raise ValueError("Informe o usuário do SQL Server.")
-
-                conn_str = (
-                    f"DRIVER={{{driver}}};"
-                    f"SERVER={server};"
-                    f"DATABASE={database};"
-                    f"UID={user};"
-                    f"PWD={password};"
-                    "TrustServerCertificate=yes;"
+                messagebox.showinfo(
+                    "Conexões Externas",
+                    "Conexão realizada com sucesso.\n\n"
+                    f"Servidor: {servidor_ok}\n"
+                    f"Banco: {banco_ok}\n\n"
+                    "Nenhum dado foi alterado.",
+                    parent=dlg,
+                )
+            except Exception as e:
+                messagebox.showerror(
+                    "Conexões Externas",
+                    f"Falha na conexão:\n{e}",
+                    parent=dlg,
                 )
 
-            conn = pyodbc.connect(conn_str, timeout=5)
+        def save_dialog():
+            try:
+                data = collect_data()
+            except Exception as e:
+                messagebox.showerror(
+                    "Conexões Externas",
+                    str(e),
+                    parent=dlg,
+                )
+                return
+
+            cid = connection_id or uuid.uuid4().hex[:12]
+            previous_status = initial.get("status", "Salvo")
+            data["id"] = cid
+            data["status"] = previous_status if previous_status in ("Conectado", "Falha") else "Salvo"
+            self.external_connections[cid] = data
+            self.current_external_id = cid
+            self._save_external_connections()
+
+            # Atualiza imediatamente a conexão atual exibida na aba.
+            self._refresh_external_tree()
+            self.update_idletasks()
+
+            dlg.grab_release()
+            dlg.destroy()
+            self.nb.select(self.tab_connector)
+            self.update_idletasks()
+
+        ttk.Button(
+            buttons,
+            text="Testar conexão",
+            command=test_dialog_connection,
+        ).pack(side="left")
+
+        ttk.Button(
+            buttons,
+            text="Salvar",
+            command=save_dialog,
+        ).pack(side="right")
+
+        ttk.Button(
+            buttons,
+            text="Cancelar",
+            command=dlg.destroy,
+        ).pack(side="right", padx=(0, 8))
+
+        ent_name.focus_set()
+
+
+    def _build_external_conn_str(self, data):
+        driver = str(data.get("driver", "")).strip()
+        server = str(data.get("server", "")).strip()
+        database = str(data.get("database", "")).strip()
+        port = str(data.get("port", "")).strip()
+        trusted = bool(data.get("trusted_connection", False))
+
+        server_target = f"{server},{port}" if port else server
+
+        if trusted:
+            return (
+                f"DRIVER={{{driver}}};"
+                f"SERVER={server_target};"
+                f"DATABASE={database};"
+                "Trusted_Connection=yes;"
+                "TrustServerCertificate=yes;"
+            )
+
+        user = str(data.get("user", "")).strip()
+        password = data.get("password", "")
+        return (
+            f"DRIVER={{{driver}}};"
+            f"SERVER={server_target};"
+            f"DATABASE={database};"
+            f"UID={user};"
+            f"PWD={password};"
+            "TrustServerCertificate=yes;"
+        )
+
+
+    def _test_external_connection_data(self, data):
+        if data.get("type") != "Microsoft SQL Server":
+            raise ValueError(
+                "Nesta etapa, somente Microsoft SQL Server está disponível."
+            )
+
+        conn_str = self._build_external_conn_str(data)
+        conn = pyodbc.connect(conn_str, timeout=5)
+        try:
             cur = conn.cursor()
             cur.execute("SELECT DB_NAME(), @@SERVERNAME")
             row = cur.fetchone()
+        finally:
             conn.close()
 
-            self._write_from_form()
-            save_cfg(self.cfg)
+        banco_ok = row[0] if row and row[0] else data.get("database", "")
+        servidor_ok = row[1] if row and len(row) > 1 and row[1] else data.get("server", "")
+        return banco_ok, servidor_ok
 
-            banco_ok = row[0] if row and row[0] else database
-            servidor_ok = row[1] if row and len(row) > 1 and row[1] else server
+
+    def _test_selected_external_connection(self):
+        connection_id = self._selected_external_id()
+        if not connection_id:
+            messagebox.showinfo(
+                "Conexões Externas",
+                "Nenhuma conexão atual está cadastrada para testar.",
+            )
+            return
+
+        data = self.external_connections.get(connection_id)
+        if not data:
+            return
+
+        try:
+            banco_ok, servidor_ok = self._test_external_connection_data(data)
+            data["status"] = "Conectado"
+            self._refresh_external_tree()
 
             messagebox.showinfo(
-                "Conector de Banco",
+                "Conexões Externas",
                 "Conexão realizada com sucesso.\n\n"
                 f"Servidor: {servidor_ok}\n"
                 f"Banco: {banco_ok}\n\n"
                 "Nenhum dado foi alterado.",
             )
         except Exception as e:
+            data["status"] = "Falha"
+            self._refresh_external_tree()
             messagebox.showerror(
-                "Conector de Banco",
-                f"Falha na conexão com o banco do cliente:\n{e}",
+                "Conexões Externas",
+                f"Falha na conexão:\n{e}",
             )
+
 
     def _test_connection(self):
         try:
@@ -1182,6 +1724,26 @@ class ConfigUI(tk.Tk):
                 p = self.cfg.get(sec, opt, fallback="").strip()
                 if p:
                     os.makedirs(p, exist_ok=True)
+
+            # Conexões externas são independentes e salvas em seções próprias.
+            if hasattr(self, "external_connections"):
+                for section in list(self.cfg.sections()):
+                    if section.startswith("external_connection:"):
+                        self.cfg.remove_section(section)
+
+                for connection_id, data in self.external_connections.items():
+                    section = self._external_section_name(connection_id)
+                    self.cfg[section] = {
+                        "name": data.get("name", ""),
+                        "type": data.get("type", "Microsoft SQL Server"),
+                        "driver": data.get("driver", "ODBC Driver 18 for SQL Server"),
+                        "server": data.get("server", ""),
+                        "port": data.get("port", "1433"),
+                        "database": data.get("database", ""),
+                        "trusted_connection": bool_to_ini(bool(data.get("trusted_connection", False))),
+                        "user": data.get("user", ""),
+                        "password": data.get("password", ""),
+                    }
 
             save_cfg(self.cfg)
             if show_message:
