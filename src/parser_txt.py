@@ -56,7 +56,8 @@ def parse_txt_documents(
     - Se desc tiver delimitador (vírgula), o parser tenta reconstruir:
       considera Qtde como o ÚLTIMO campo numérico da linha.
     - Se group_items=True: agrupa por GTIN (>0) senão por CodProd (extraído da desc)
-      e soma a QtdeDoc.
+      e soma a QtdeDoc. Quando houver Localizacao, ela também participa da chave
+      para não misturar o mesmo produto armazenado em locais diferentes.
 
     Retorno:
       {
@@ -64,7 +65,7 @@ def parse_txt_documents(
           "NomeCli": "DOM PALITO",
           "Cidade": "ILHEUS",
           "UF": "BA",
-          "Itens": [ {CodProd, GTIN, DescProd, QtdeDoc}, ... ]
+          "Itens": [ {CodProd, GTIN, DescProd, QtdeDoc, Localizacao}, ... ]
         },
         "200": {...}
       }
@@ -119,6 +120,10 @@ def parse_txt_documents(
 
             qtde_doc = _to_decimal(parts[qty_idx])
 
+            # Tudo que vier depois da quantidade pertence à Localização.
+            # No layout atual do NFLOG é a última coluna (ex.: RUA_127).
+            localizacao = delimiter.join(parts[qty_idx + 1:]).strip() if qty_idx + 1 < len(parts) else ""
+
             # CodProd: tenta extrair do começo da descrição; fallback = GTIN (texto)
             cod_prod = _extract_codprod_from_desc(desc_prod, fallback=str(gtin) if gtin else "0")
 
@@ -127,6 +132,7 @@ def parse_txt_documents(
                 "GTIN": gtin,
                 "DescProd": desc_prod,
                 "QtdeDoc": qtde_doc,
+                "Localizacao": localizacao,
             }
 
             if num_doc not in docs:
@@ -151,7 +157,9 @@ def parse_txt_documents(
                 doc["Itens"].append(item)
             else:
                 # agrupa por GTIN se existir, senão por CodProd
-                key = ("GTIN", gtin) if gtin > 0 else ("COD", cod_prod)
+                # Localização faz parte da chave: o mesmo produto pode existir
+                # em ruas/posições diferentes e não deve ser fundido em um único item.
+                key = ("GTIN", gtin, localizacao) if gtin > 0 else ("COD", cod_prod, localizacao)
                 agrup = doc.setdefault("_agrup", {})
                 if key not in agrup:
                     agrup[key] = item

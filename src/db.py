@@ -107,9 +107,18 @@ def insert_prodconf_items(conn, num_doc: str, nome_cli: str, itens: list[dict], 
     Cada item deve ter:
       CodProd, GTIN, DescProd, QtdeDoc
     E opcionalmente:
+      Localizacao  -> gravada quando dbo.prodConf possuir Localizacao, Localização ou Local
       NItem (int)  -> só será gravado se a coluna existir no banco
     """
     has_nitem = prodconf_has_column(conn, "NItem")
+
+    # Compatibilidade com bancos já existentes: procura o nome real da coluna
+    # de localização sem exigir alteração de configuração.
+    localizacao_col = None
+    for candidato in ("Localizacao", "Localização", "Local"):
+        if prodconf_has_column(conn, candidato):
+            localizacao_col = candidato
+            break
 
     data_imp = date.today()
     data_hora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -118,20 +127,21 @@ def insert_prodconf_items(conn, num_doc: str, nome_cli: str, itens: list[dict], 
     insert_logconf_header(conn, num_doc, nome_cli, status_conf="AGUARDANDO", coletor_id=coletor_id)
 
     # >>> Detalhe (prodConf)
+    colunas = ["NumDoc", "NomeCli", "DataImp"]
     if has_nitem:
-        sql = """
-        INSERT INTO dbo.prodConf
-          (NumDoc, NomeCli, DataImp, NItem, CodProd, GTIN, DescProd, QtdeDoc, QtdeLido, Status, DataeHora, ColetorID)
-        VALUES
-          (?,      ?,       ?,     ?,     ?,       ?,    ?,        ?,       ?,        ?,      ?,         ?)
-        """
-    else:
-        sql = """
-        INSERT INTO dbo.prodConf
-          (NumDoc, NomeCli, DataImp, CodProd, GTIN, DescProd, QtdeDoc, QtdeLido, Status, DataeHora, ColetorID)
-        VALUES
-          (?,      ?,       ?,     ?,       ?,    ?,        ?,       ?,        ?,      ?,         ?)
-        """
+        colunas.append("NItem")
+
+    colunas.extend([
+        "CodProd", "GTIN", "DescProd", "QtdeDoc", "QtdeLido",
+        "Status", "DataeHora", "ColetorID",
+    ])
+
+    if localizacao_col:
+        colunas.append(localizacao_col)
+
+    placeholders = ", ".join("?" for _ in colunas)
+    nomes_colunas = ", ".join(f"[{c}]" for c in colunas)
+    sql = f"INSERT INTO dbo.prodConf ({nomes_colunas}) VALUES ({placeholders})"
 
     cur = conn.cursor()
     for it in itens:
@@ -140,37 +150,33 @@ def insert_prodconf_items(conn, num_doc: str, nome_cli: str, itens: list[dict], 
         desc = str(it.get("DescProd", ""))[:50]
         qtde = Decimal(str(it.get("QtdeDoc", "0")))
         qtde_lido = Decimal("0")
+        localizacao = str(it.get("Localizacao", "") or "").strip()
+
+        valores = [
+            str(num_doc)[:50],
+            str(nome_cli)[:50],
+            data_imp,
+        ]
 
         if has_nitem:
-            nitem = it.get("NItem", None)
-            cur.execute(sql, (
-                str(num_doc)[:50],
-                str(nome_cli)[:50],
-                data_imp,
-                nitem,
-                codprod,
-                gtin,
-                desc,
-                qtde,
-                qtde_lido,
-                str(status_inicial)[:3],
-                str(data_hora)[:50],
-                str(coletor_id or "")[:100],
-            ))
-        else:
-            cur.execute(sql, (
-                str(num_doc)[:50],
-                str(nome_cli)[:50],
-                data_imp,
-                codprod,
-                gtin,
-                desc,
-                qtde,
-                qtde_lido,
-                str(status_inicial)[:3],
-                str(data_hora)[:50],
-                str(coletor_id or "")[:100],
-            ))
+            valores.append(it.get("NItem", None))
+
+        valores.extend([
+            codprod,
+            gtin,
+            desc,
+            qtde,
+            qtde_lido,
+            str(status_inicial)[:3],
+            str(data_hora)[:50],
+            str(coletor_id or "")[:100],
+        ])
+
+        if localizacao_col:
+            # O SQL Server fará a validação final do tamanho/tipo da coluna.
+            valores.append(localizacao)
+
+        cur.execute(sql, tuple(valores))
 
     conn.commit()
 
