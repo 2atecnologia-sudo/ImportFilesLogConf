@@ -23,11 +23,11 @@ def registrar_evento_usuario(
 
     linhas = [f"{datetime.now():%d/%m/%Y %H:%M:%S} | {(nivel or 'INFO').upper()} | {titulo}"]
     if onde:
-        linhas.append(f"Onde: {onde}")
+        linhas.append(f"Ação: {onde}")
     if porque:
         linhas.append(f"Por que: {porque}")
     if como_resolver:
-        linhas.append(f"Como resolver: {como_resolver}")
+        linhas.append(f"O que fazer: {como_resolver}")
     if detalhe:
         linhas.append(f"Detalhe: {detalhe}")
     linhas.append("")
