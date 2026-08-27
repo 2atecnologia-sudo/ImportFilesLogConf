@@ -139,13 +139,15 @@ class ConfigUI(tk.Tk):
         tab_input = ttk.Frame(self.nb)
         tab_app = ttk.Frame(self.nb)
         tab_output = ttk.Frame(self.nb)
+        tab_connector = ttk.Frame(self.nb)
         self.tab_status = ttk.Frame(self.nb)
 
-        self.nb.add(tab_sql, text="SQL Server")
+        self.nb.add(tab_sql, text="Banco Local logConf")
         self.nb.add(tab_paths, text="Pastas")
         self.nb.add(tab_input, text="Entrada (XML/TXT)")
         self.nb.add(tab_app, text="Aplicação")
         self.nb.add(tab_output, text="Arquivos de Saída")
+        self.nb.add(tab_connector, text="Conexões Externas")
         self.nb.add(self.tab_status, text="Status / Logs")
 
         self.tab_about = ttk.Frame(self.nb)
@@ -332,6 +334,64 @@ class ConfigUI(tk.Tk):
         )
         cmb_file_name.grid(row=6, column=1, sticky="w", padx=8, pady=6)
         self.widgets["output.file_name_mode"] = cmb_file_name
+
+        # ---- Conector de Banco de Dados - Etapa 1
+        fc = ttk.LabelFrame(tab_connector, text="Integração com banco de dados do cliente")
+        fc.pack(fill="x", padx=10, pady=10)
+
+        self.vars["connector.type"] = tk.StringVar()
+        ttk.Label(fc, text="Tipo de banco").grid(
+            row=0, column=0, sticky="w", padx=8, pady=6
+        )
+        cmb_connector_type = ttk.Combobox(
+            fc,
+            textvariable=self.vars["connector.type"],
+            values=[
+                "Microsoft SQL Server",
+                "PostgreSQL (em breve)",
+                "MySQL / MariaDB (em breve)",
+                "Oracle (em breve)",
+                "SAP HANA (em breve)",
+                "ODBC genérico (em breve)",
+                "OLE DB (em breve)",
+            ],
+            state="readonly",
+            width=38,
+        )
+        cmb_connector_type.grid(row=0, column=1, sticky="w", padx=8, pady=6)
+        self.widgets["connector.type"] = cmb_connector_type
+
+        self._entry(fc, "Driver ODBC", "connector.driver", 1)
+        self._entry(fc, "Servidor (IP ou HOST\\INSTÂNCIA)", "connector.server", 2)
+        self._entry(fc, "Banco", "connector.database", 3)
+
+        self.vars["connector.trusted_connection"] = tk.BooleanVar()
+        ttk.Checkbutton(
+            fc,
+            text="Usar autenticação do Windows (Trusted Connection)",
+            variable=self.vars["connector.trusted_connection"],
+            command=self._apply_states,
+        ).grid(row=4, column=0, columnspan=3, sticky="w", padx=8, pady=8)
+
+        self._entry(fc, "Usuário", "connector.user", 5)
+        self._entry(fc, "Senha", "connector.password", 6, show="*")
+
+        ttk.Label(
+            fc,
+            text=(
+                "Etapa 1: somente conexão com o banco do cliente. "
+                "Nenhum dado será alterado."
+            ),
+        ).grid(row=7, column=0, columnspan=3, sticky="w", padx=8, pady=(8, 4))
+
+        connector_actions = ttk.Frame(tab_connector)
+        connector_actions.pack(fill="x", padx=20, pady=(0, 10))
+
+        ttk.Button(
+            connector_actions,
+            text="Testar conexão",
+            command=self._test_connector_connection,
+        ).pack(side="left")
 
         # ---- Status / Logs
         self._build_status_tab()
@@ -836,6 +896,29 @@ class ConfigUI(tk.Tk):
 
         self.vars["sql.trusted_connection"].set(as_bool(g("sql", "trusted_connection", "no")))
 
+        # Conector de Banco de Dados do cliente
+        self.vars["connector.type"].set(
+            g("connector", "type", "Microsoft SQL Server")
+        )
+        self.vars["connector.driver"].set(
+            g("connector", "driver", "ODBC Driver 18 for SQL Server")
+        )
+        self.vars["connector.server"].set(
+            g("connector", "server", "")
+        )
+        self.vars["connector.database"].set(
+            g("connector", "database", "")
+        )
+        self.vars["connector.user"].set(
+            g("connector", "user", "")
+        )
+        self.vars["connector.password"].set(
+            g("connector", "password", "")
+        )
+        self.vars["connector.trusted_connection"].set(
+            as_bool(g("connector", "trusted_connection", "no"))
+        )
+
         # Pastas
         self.vars["watch.input_dir"].set(g("watch", "input_dir", r"C:\MIS\entrada"))
         self.vars["watch.processed_dir"].set(g("watch", "processed_dir", r"C:\MIS\processados"))
@@ -906,6 +989,14 @@ class ConfigUI(tk.Tk):
         self.widgets["sql.user"].configure(state=("disabled" if trusted else "normal"))
         self.widgets["sql.password"].configure(state=("disabled" if trusted else "normal"))
 
+        connector_trusted = self.vars["connector.trusted_connection"].get()
+        self.widgets["connector.user"].configure(
+            state=("disabled" if connector_trusted else "normal")
+        )
+        self.widgets["connector.password"].configure(
+            state=("disabled" if connector_trusted else "normal")
+        )
+
         fmt = (self.vars["input.format"].get() or "xml").strip().lower()
         txt_state = "normal" if fmt == "txt" else "disabled"
 
@@ -926,6 +1017,19 @@ class ConfigUI(tk.Tk):
         setv("sql", "trusted_connection", bool_to_ini(self.vars["sql.trusted_connection"].get()))
         setv("sql", "user", self.vars["sql.user"].get().strip())
         setv("sql", "password", self.vars["sql.password"].get())
+
+        # Conector de Banco de Dados do cliente
+        setv("connector", "type", self.vars["connector.type"].get().strip())
+        setv("connector", "driver", self.vars["connector.driver"].get().strip())
+        setv("connector", "server", self.vars["connector.server"].get().strip())
+        setv("connector", "database", self.vars["connector.database"].get().strip())
+        setv(
+            "connector",
+            "trusted_connection",
+            bool_to_ini(self.vars["connector.trusted_connection"].get()),
+        )
+        setv("connector", "user", self.vars["connector.user"].get().strip())
+        setv("connector", "password", self.vars["connector.password"].get())
 
         # Pastas
         setv("watch", "input_dir", self.vars["watch.input_dir"].get().strip())
@@ -978,6 +1082,76 @@ class ConfigUI(tk.Tk):
                 "numdoc_data_hora",
             ),
         )
+
+    def _test_connector_connection(self):
+        try:
+            tipo = self.vars["connector.type"].get().strip()
+            if tipo != "Microsoft SQL Server":
+                messagebox.showinfo(
+                    "Conector de Banco",
+                    "Nesta etapa, somente Microsoft SQL Server está disponível.",
+                )
+                return
+
+            driver = self.vars["connector.driver"].get().strip()
+            server = self.vars["connector.server"].get().strip()
+            database = self.vars["connector.database"].get().strip()
+            trusted = self.vars["connector.trusted_connection"].get()
+
+            if not driver:
+                raise ValueError("Informe o Driver ODBC.")
+            if not server:
+                raise ValueError("Informe o servidor SQL Server.")
+            if not database:
+                raise ValueError("Informe o banco de dados.")
+
+            if trusted:
+                conn_str = (
+                    f"DRIVER={{{driver}}};"
+                    f"SERVER={server};"
+                    f"DATABASE={database};"
+                    "Trusted_Connection=yes;"
+                    "TrustServerCertificate=yes;"
+                )
+            else:
+                user = self.vars["connector.user"].get().strip()
+                password = self.vars["connector.password"].get()
+                if not user:
+                    raise ValueError("Informe o usuário do SQL Server.")
+
+                conn_str = (
+                    f"DRIVER={{{driver}}};"
+                    f"SERVER={server};"
+                    f"DATABASE={database};"
+                    f"UID={user};"
+                    f"PWD={password};"
+                    "TrustServerCertificate=yes;"
+                )
+
+            conn = pyodbc.connect(conn_str, timeout=5)
+            cur = conn.cursor()
+            cur.execute("SELECT DB_NAME(), @@SERVERNAME")
+            row = cur.fetchone()
+            conn.close()
+
+            self._write_from_form()
+            save_cfg(self.cfg)
+
+            banco_ok = row[0] if row and row[0] else database
+            servidor_ok = row[1] if row and len(row) > 1 and row[1] else server
+
+            messagebox.showinfo(
+                "Conector de Banco",
+                "Conexão realizada com sucesso.\n\n"
+                f"Servidor: {servidor_ok}\n"
+                f"Banco: {banco_ok}\n\n"
+                "Nenhum dado foi alterado.",
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "Conector de Banco",
+                f"Falha na conexão com o banco do cliente:\n{e}",
+            )
 
     def _test_connection(self):
         try:
