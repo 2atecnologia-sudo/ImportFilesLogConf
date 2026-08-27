@@ -265,6 +265,7 @@ def process_txt(file_path: str, settings, coletor_id: str | None = None):
                 f"[NFLOG SQL OK] "
                 f"Arquivo={os.path.basename(file_path)} | "
                 f"DocumentosImportados={imported} | "
+                f"DestinoSQL=dbo.logConf + dbo.prodConf | "
                 f"Arquivo preservado em entrada aguardando .ok do coletor."
             )
         elif skipped_dup > 0:
@@ -283,9 +284,12 @@ def process_txt(file_path: str, settings, coletor_id: str | None = None):
         except Exception:
             pass
 
-        conn.close()
-        raise
+        try:
+            conn.close()
+        except Exception:
+            pass
 
+        raise
 
 def _process_file_impl(file_path: str, settings):
     fmt = settings.app.input_format
@@ -347,7 +351,7 @@ def _process_file_impl(file_path: str, settings):
                 f"[NFLOG RECEBIDO] "
                 f"Coletor={info.coletor_id} | "
                 f"Arquivo={info.nome_arquivo} | "
-                f"Iniciando importação no SQL antes da confirmação do coletor."
+                f"Gravando cabeçalhos AGUARDANDO no SQL."
             )
 
             process_txt(
@@ -360,7 +364,7 @@ def _process_file_impl(file_path: str, settings):
                 f"[NFLOG AGUARDANDO OK] "
                 f"Coletor={info.coletor_id} | "
                 f"Arquivo={info.nome_arquivo} | "
-                f"SQL processado. Arquivo mantido em entrada para o coletor."
+                f"SQL processado. Arquivo mantido em entrada aguardando .ok."
             )
             return
 
@@ -1024,7 +1028,7 @@ def process_existing(settings):
 
 
 def _tem_arquivos_pendentes(settings) -> bool:
-    # NFLOG .txt depende do SQL; somente .txt.ok não precisa de retry SQL.
+    # NFLOG não depende do SQL Server e não dispara retry SQL.
     inp = settings.watch.input_dir
 
     try:
@@ -1037,10 +1041,7 @@ def _tem_arquivos_pendentes(settings) -> bool:
             info = identificar_arquivo(path)
 
             if info is not None and info.tipo == "nflog":
-                # NFLOG .txt precisa de SQL; NFLOG .txt.ok só precisa ser arquivado.
-                if info.confirmado:
-                    continue
-                return True
+                continue
 
             return True
 

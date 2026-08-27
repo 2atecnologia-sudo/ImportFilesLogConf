@@ -112,6 +112,9 @@ class ConfigUI(tk.Tk):
         self._apply_states()
         self._select_initial_tab()
 
+        # Qualquer forma de fechar a janela salva todas as configurações.
+        self.protocol("WM_DELETE_WINDOW", self._save_and_close)
+
         # Atualiza a aba de Status/Logs periodicamente enquanto a janela estiver aberta.
         self.after(300, self._status_auto_refresh)
 
@@ -329,7 +332,7 @@ class ConfigUI(tk.Tk):
         bottom.pack(fill="x", padx=10, pady=(0, 10))
 
         ttk.Button(bottom, text="Salvar", command=self._save).pack(side="right")
-        ttk.Button(bottom, text="Fechar", command=self.destroy).pack(side="right", padx=(0, 8))
+        ttk.Button(bottom, text="Fechar", command=self._save_and_close).pack(side="right", padx=(0, 8))
 
 
     def _build_status_tab(self):
@@ -886,7 +889,7 @@ class ConfigUI(tk.Tk):
         except Exception as e:
             messagebox.showerror("Teste de conexão", f"Falha na conexão:\n{e}")
 
-    def _save(self):
+    def _save(self, show_message=True):
         try:
             self._write_from_form()
 
@@ -904,9 +907,17 @@ class ConfigUI(tk.Tk):
                     os.makedirs(p, exist_ok=True)
 
             save_cfg(self.cfg)
-            messagebox.showinfo("Salvar", f"Salvo em: {os.path.abspath(CONFIG_PATH)}")
+            if show_message:
+                messagebox.showinfo("Salvar", f"Salvo em: {os.path.abspath(CONFIG_PATH)}")
+            return True
         except Exception as e:
             messagebox.showerror("Erro ao salvar", str(e))
+            return False
+
+    def _save_and_close(self):
+        """Salva o estado atual de todas as abas e fecha somente se salvar com sucesso."""
+        if self._save(show_message=False):
+            self.destroy()
 
 
 if __name__ == "__main__":
