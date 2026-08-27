@@ -173,3 +173,32 @@ def insert_prodconf_items(conn, num_doc: str, nome_cli: str, itens: list[dict], 
             ))
 
     conn.commit()
+
+def get_conference_table_counts(conn) -> tuple[int, int]:
+    """Retorna (qtd_logconf, qtd_prodconf)."""
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM dbo.logConf")
+    qtd_logconf = int(cur.fetchone()[0] or 0)
+    cur.execute("SELECT COUNT(*) FROM dbo.prodConf")
+    qtd_prodconf = int(cur.fetchone()[0] or 0)
+    return qtd_logconf, qtd_prodconf
+
+
+def normalize_empty_conference_tables(conn) -> tuple[int, int, bool]:
+    """Normaliza logConf/prodConf quando uma ou ambas estiverem vazias."""
+    qtd_logconf, qtd_prodconf = get_conference_table_counts(conn)
+
+    if qtd_logconf == 0 and qtd_prodconf == 0:
+        return qtd_logconf, qtd_prodconf, True
+
+    if qtd_logconf == 0 and qtd_prodconf > 0:
+        conn.cursor().execute("DELETE FROM dbo.prodConf")
+        conn.commit()
+        return qtd_logconf, qtd_prodconf, True
+
+    if qtd_logconf > 0 and qtd_prodconf == 0:
+        conn.cursor().execute("DELETE FROM dbo.logConf")
+        conn.commit()
+        return qtd_logconf, qtd_prodconf, True
+
+    return qtd_logconf, qtd_prodconf, False

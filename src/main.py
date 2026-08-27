@@ -12,7 +12,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 from .settings import load_settings
-from .db import get_connection, numdoc_exists, insert_prodconf_items
+from .db import get_connection, numdoc_exists, insert_prodconf_items, normalize_empty_conference_tables
 from .parser_xml import parse_nfe_xml
 from .parser_txt import parse_txt_documents
 from .file_router import identificar_arquivo, localizar_par_sync
@@ -999,8 +999,58 @@ class Handler(FileSystemEventHandler):
         )
 
 
+
+def _reiniciar_conferencias_se_necessario(settings):
+    """Detecta banco vazio/inconsistente e prepara reconstrução pelo NFLOG."""
+    conn = get_connection(settings.sql)
+    try:
+        qtd_logconf, qtd_prodconf, precisa_reconstruir = normalize_empty_conference_tables(conn)
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    if not precisa_reconstruir:
+        return False
+
+    if qtd_logconf == 0 and qtd_prodconf == 0:
+        logging.warning(
+            "[BANCO VAZIO] logConf=0 | prodConf=0 | "
+            "Aguardando/reprocessando NFLOG para reiniciar as conferencias."
+        )
+    else:
+        logging.warning(
+            f"[BANCO INCONSISTENTE] logConf={qtd_logconf} | prodConf={qtd_prodconf} | "
+            "Tabela remanescente zerada para reinicializacao."
+        )
+
+    write_runtime_status(
+        BASE_DIR,
+        {
+            "estado": "ATENCAO",
+            "titulo": "Banco vazio",
+            "mensagem": "Banco zerado. Aguardando NFLOG para reiniciar as conferencias.",
+            "orientacao": "",
+        },
+    )
+    return True
+
+
 def process_existing(settings):
     inp = settings.watch.input_dir
+
+    banco_precisa_reconstruir = False
+    try:
+        banco_precisa_reconstruir = _reiniciar_conferencias_se_necessario(settings)
+    except Exception as e:
+        logging.exception(f"[BANCO][ERRO AO VERIFICAR ESTADO] {e}")
 
     for name in sorted(os.listdir(inp)):
         path = os.path.join(inp, name)
@@ -1011,6 +1061,36 @@ def process_existing(settings):
                     path,
                     settings,
                 )
+
+                if banco_precisa_reconstruir:
+                    info_atual = identificar_arquivo(path)
+                    if info_atual is not None and info_atual.tipo == "nflog" and not info_atual.confirmado:
+                        conn_check = get_connection(settings.sql)
+                        try:
+                            cur_check = conn_check.cursor()
+                            cur_check.execute("SELECT COUNT(*) FROM dbo.logConf")
+                            qtd_log = int(cur_check.fetchone()[0] or 0)
+                            cur_check.execute("SELECT COUNT(*) FROM dbo.prodConf")
+                            qtd_prod = int(cur_check.fetchone()[0] or 0)
+                        finally:
+                            conn_check.close()
+
+                        if qtd_log > 0 and qtd_prod > 0:
+                            logging.info(
+                                f"[BANCO ZERADO E REINICIADO] NFLOG={os.path.basename(path)} | "
+                                f"logConf={qtd_log} | prodConf={qtd_prod}"
+                            )
+                            write_runtime_status(
+                                BASE_DIR,
+                                {
+                                    "estado": "OK",
+                                    "titulo": "Banco zerado e reiniciado",
+                                    "arquivo": os.path.basename(path),
+                                    "mensagem": f"NFLOG importado normalmente. logConf={qtd_log}; prodConf={qtd_prod}.",
+                                    "orientacao": "",
+                                },
+                            )
+                            banco_precisa_reconstruir = False
 
             except Exception as e:
                 logging.exception(
@@ -1160,7 +1240,14 @@ def main():
 
             if agora >= proxima_tentativa_sql:
                 proxima_tentativa_sql = agora + _RETRY_SQL_INTERVAL_SEC
-                _reprocessar_pendentes_automaticamente(settings)
+                try:
+                    settings_atualizados = load_settings()
+                    if _reiniciar_conferencias_se_necessario(settings_atualizados):
+                        process_existing(settings_atualizados)
+                    else:
+                        _reprocessar_pendentes_automaticamente(settings_atualizados)
+                except Exception as e:
+                    logging.exception(f"[BANCO][ERRO NA VERIFICACAO PERIODICA] {e}")
 
     except KeyboardInterrupt:
         observer.stop()
