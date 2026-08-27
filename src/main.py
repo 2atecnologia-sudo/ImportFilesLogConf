@@ -370,11 +370,11 @@ def _process_file_impl(file_path: str, settings):
             registrar_evento_usuario(
                 settings,
                 nivel="OK",
-                titulo="NFLOG importado com sucesso",
-                onde=info.nome_arquivo,
-                porque="Novo NFLOG detectado na pasta de entrada.",
-                como_resolver="Nenhuma ação necessária. O arquivo ficará aguardando a confirmação .ok do coletor.",
-                detalhe=f"Coletor: {info.coletor_id}",
+                titulo="NFLOG recebido",
+                onde=f"Arquivo {info.nome_arquivo} recebido.",
+                porque="Novo arquivo NFLOG disponível para o coletor.",
+                como_resolver=f"Aguardando importação pelo coletor {info.coletor_id}.",
+                detalhe="Arquivo mantido na pasta de entrada.",
             )
             return
 
@@ -430,6 +430,16 @@ def _process_file_impl(file_path: str, settings):
             f"[NFLOG ARQUIVADO] "
             f"Coletor={info.coletor_id} | "
             f"Destino={destino_final}"
+        )
+
+        registrar_evento_usuario(
+            settings,
+            nivel="OK",
+            titulo="NFLOG importado pelo coletor",
+            onde=f"Arquivo {nome_original[:-3] if nome_original.lower().endswith('.ok') else nome_original} importado pelo coletor {info.coletor_id}.",
+            porque="O coletor confirmou a importação do arquivo.",
+            como_resolver="Nenhuma ação necessária.",
+            detalhe=f"Arquivo movido para a pasta {nflog_processados_dir}.",
         )
         return
 

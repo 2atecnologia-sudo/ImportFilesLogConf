@@ -268,104 +268,6 @@ def show_status(icon, item=None):
     _abrir_configuracao(aba_status=True)
 
 
-def _ler_blocos_log(caminho: str, tecnico: bool) -> list[list[str]]:
-    """
-    Lê o log em blocos preservando traceback/linhas auxiliares.
-    O arquivo original não é modificado.
-    """
-    if not os.path.isfile(caminho):
-        return []
-
-    with open(caminho, "r", encoding="utf-8", errors="replace") as f:
-        linhas = [linha.rstrip("\n") for linha in f]
-
-    if tecnico:
-        # Ex.: 2026-08-27 13:45:12,123 | INFO | ...
-        inicio_evento = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
-        blocos = []
-        atual = []
-
-        for linha in linhas:
-            if inicio_evento.match(linha):
-                if atual:
-                    blocos.append(atual)
-                atual = [linha]
-            else:
-                # Traceback e continuações pertencem ao evento anterior.
-                if atual:
-                    atual.append(linha)
-                elif linha.strip():
-                    atual = [linha]
-
-        if atual:
-            blocos.append(atual)
-
-        return blocos
-
-    # usuario.log: blocos separados por linha em branco.
-    blocos = []
-    atual = []
-
-    for linha in linhas:
-        if linha.strip():
-            atual.append(linha)
-        elif atual:
-            blocos.append(atual)
-            atual = []
-
-    if atual:
-        blocos.append(atual)
-
-    return blocos
-
-
-def _abrir_log_recente_primeiro(nome_original: str, nome_visualizacao: str, tecnico: bool):
-    s = load_settings()
-    log_dir = s.logging.log_dir
-    os.makedirs(log_dir, exist_ok=True)
-
-    original = os.path.join(log_dir, nome_original)
-    visualizacao = os.path.join(log_dir, nome_visualizacao)
-
-    if not os.path.exists(original):
-        with open(original, "a", encoding="utf-8"):
-            pass
-
-    try:
-        blocos = _ler_blocos_log(original, tecnico=tecnico)
-        blocos.reverse()
-
-        with open(visualizacao, "w", encoding="utf-8") as f:
-            if not blocos:
-                f.write("Nenhum registro encontrado.\n")
-            else:
-                for bloco in blocos:
-                    for linha in bloco:
-                        f.write(linha + "\n")
-                    f.write("\n")
-
-        os.startfile(visualizacao)
-
-    except Exception:
-        # Se a visualização falhar, abre o log original para nunca impedir acesso.
-        os.startfile(original)
-
-
-def open_user_log(icon, item=None):
-    _abrir_log_recente_primeiro(
-        "usuario.log",
-        "usuario_recente_primeiro.log",
-        tecnico=False,
-    )
-
-
-def open_technical_log(icon, item=None):
-    _abrir_log_recente_primeiro(
-        "importador.log",
-        "importador_recente_primeiro.log",
-        tecnico=True,
-    )
-
 def open_input_folder(icon, item=None):
     s = load_settings()
 
@@ -734,16 +636,6 @@ def run_tray():
         pystray.MenuItem(
             "Abrir pasta de entrada",
             open_input_folder
-        ),
-
-        pystray.MenuItem(
-            "Abrir log do usuário",
-            open_user_log
-        ),
-
-        pystray.MenuItem(
-            "Abrir log técnico",
-            open_technical_log
         ),
 
         pystray.Menu.SEPARATOR,

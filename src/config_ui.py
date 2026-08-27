@@ -10,6 +10,7 @@ import pyodbc
 from PIL import Image, ImageTk
 
 from .runtime_status import read_runtime_status
+import re
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -386,28 +387,75 @@ class ConfigUI(tk.Tk):
             justify="left",
         ).pack(anchor="w", padx=10, pady=8)
 
-        logs = ttk.LabelFrame(self.tab_status, text="Eventos recentes para o usuário")
+        logs = ttk.LabelFrame(self.tab_status, text="Logs da aplicação")
         logs.pack(fill="both", expand=True, padx=10, pady=6)
 
+        self.logs_nb = ttk.Notebook(logs)
+        self.logs_nb.pack(fill="both", expand=True, padx=4, pady=4)
+
+        self.tab_log_usuario = ttk.Frame(self.logs_nb)
+        self.tab_log_tecnico = ttk.Frame(self.logs_nb)
+
+        self.logs_nb.add(self.tab_log_usuario, text="Log do Usuário")
+        self.logs_nb.add(self.tab_log_tecnico, text="Log Técnico")
+
+        # ---- Log do usuário ----
         self.log_text = tk.Text(
-            logs,
+            self.tab_log_usuario,
             wrap="none",
-            height=16,
+            height=14,
             state="disabled",
             font=("Consolas", 9),
         )
-        yscroll = ttk.Scrollbar(logs, orient="vertical", command=self.log_text.yview)
-        xscroll = ttk.Scrollbar(logs, orient="horizontal", command=self.log_text.xview)
+        user_y = ttk.Scrollbar(
+            self.tab_log_usuario,
+            orient="vertical",
+            command=self.log_text.yview,
+        )
+        user_x = ttk.Scrollbar(
+            self.tab_log_usuario,
+            orient="horizontal",
+            command=self.log_text.xview,
+        )
         self.log_text.configure(
-            yscrollcommand=yscroll.set,
-            xscrollcommand=xscroll.set,
+            yscrollcommand=user_y.set,
+            xscrollcommand=user_x.set,
         )
 
         self.log_text.grid(row=0, column=0, sticky="nsew")
-        yscroll.grid(row=0, column=1, sticky="ns")
-        xscroll.grid(row=1, column=0, sticky="ew")
-        logs.grid_rowconfigure(0, weight=1)
-        logs.grid_columnconfigure(0, weight=1)
+        user_y.grid(row=0, column=1, sticky="ns")
+        user_x.grid(row=1, column=0, sticky="ew")
+        self.tab_log_usuario.grid_rowconfigure(0, weight=1)
+        self.tab_log_usuario.grid_columnconfigure(0, weight=1)
+
+        # ---- Log técnico ----
+        self.tech_log_text = tk.Text(
+            self.tab_log_tecnico,
+            wrap="none",
+            height=14,
+            state="disabled",
+            font=("Consolas", 9),
+        )
+        tech_y = ttk.Scrollbar(
+            self.tab_log_tecnico,
+            orient="vertical",
+            command=self.tech_log_text.yview,
+        )
+        tech_x = ttk.Scrollbar(
+            self.tab_log_tecnico,
+            orient="horizontal",
+            command=self.tech_log_text.xview,
+        )
+        self.tech_log_text.configure(
+            yscrollcommand=tech_y.set,
+            xscrollcommand=tech_x.set,
+        )
+
+        self.tech_log_text.grid(row=0, column=0, sticky="nsew")
+        tech_y.grid(row=0, column=1, sticky="ns")
+        tech_x.grid(row=1, column=0, sticky="ew")
+        self.tab_log_tecnico.grid_rowconfigure(0, weight=1)
+        self.tab_log_tecnico.grid_columnconfigure(0, weight=1)
 
         actions = ttk.Frame(self.tab_status)
         actions.pack(fill="x", padx=10, pady=(0, 10))
@@ -417,12 +465,6 @@ class ConfigUI(tk.Tk):
             text="Atualizar",
             command=self._refresh_status_tab,
         ).pack(side="left")
-
-        ttk.Button(
-            actions,
-            text="Abrir log do usuário",
-            command=self._open_log_dir,
-        ).pack(side="left", padx=(8, 0))
 
     def _build_about_tab(self):
         container = ttk.Frame(self.tab_about, padding=28)
@@ -643,6 +685,55 @@ class ConfigUI(tk.Tk):
         except Exception as e:
             return [f"Não foi possível ler o log do usuário: {e}"]
 
+    def _read_technical_events(self, max_lines=220):
+        log_dir = self.cfg.get(
+            "logging",
+            "log_dir",
+            fallback=os.path.join(BASE_DIR, "logs"),
+        ).strip()
+        log_path = os.path.join(log_dir, "importador.log")
+
+        if not os.path.isfile(log_path):
+            return ["Nenhum evento técnico registrado ainda."]
+
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                linhas = [line.rstrip("\n") for line in f.readlines()]
+
+            # Cada linha que começa com timestamp inicia um novo evento.
+            # Linhas de traceback/continuação permanecem junto do evento anterior.
+            inicio = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
+            blocos = []
+            atual = []
+
+            for linha in linhas:
+                if inicio.match(linha):
+                    if atual:
+                        blocos.append(atual)
+                    atual = [linha]
+                else:
+                    if atual:
+                        atual.append(linha)
+                    elif linha.strip():
+                        atual = [linha]
+
+            if atual:
+                blocos.append(atual)
+
+            blocos.reverse()
+
+            resultado = []
+            for bloco in blocos:
+                resultado.extend(bloco)
+                resultado.append("")
+                if len(resultado) >= max_lines:
+                    break
+
+            return resultado[:max_lines] or ["Nenhum evento técnico registrado ainda."]
+
+        except Exception as e:
+            return [f"Não foi possível ler o log técnico: {e}"]
+
     def _last_result_from_log(self) -> str:
         lines = self._read_recent_events(max_lines=80)
         for line in reversed(lines):
@@ -661,7 +752,7 @@ class ConfigUI(tk.Tk):
         estado = runtime.get("estado", "")
 
         self.status_vars["importer"].set(
-            "RODANDO" if importer_ok else "PARADO"
+            "AGUARDANDO NOVOS LANÇAMENTOS"
         )
 
         if estado == "SQL_PENDENTE":
@@ -694,6 +785,13 @@ class ConfigUI(tk.Tk):
         self.log_text.see("1.0")
         self.log_text.configure(state="disabled")
 
+        technical_events = self._read_technical_events()
+        self.tech_log_text.configure(state="normal")
+        self.tech_log_text.delete("1.0", "end")
+        self.tech_log_text.insert("1.0", "\n".join(technical_events))
+        self.tech_log_text.see("1.0")
+        self.tech_log_text.configure(state="disabled")
+
     def _status_auto_refresh(self):
         try:
             if hasattr(self, "nb") and hasattr(self, "tab_status"):
@@ -702,22 +800,6 @@ class ConfigUI(tk.Tk):
         finally:
             if self.winfo_exists():
                 self.after(5000, self._status_auto_refresh)
-
-    def _open_log_dir(self):
-        log_dir = self.cfg.get(
-            "logging",
-            "log_dir",
-            fallback=os.path.join(BASE_DIR, "logs"),
-        ).strip()
-        os.makedirs(log_dir, exist_ok=True)
-        log_path = os.path.join(log_dir, "usuario.log")
-
-        if not os.path.exists(log_path):
-            with open(log_path, "a", encoding="utf-8"):
-                pass
-
-        if os.name == "nt":
-            os.startfile(log_path)
 
     def _entry(self, parent, label, key, row, show=None):
         self.vars[key] = tk.StringVar()
