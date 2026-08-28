@@ -43,6 +43,17 @@ _RETRY_SQL_INTERVAL_SEC = 30
 _retry_sql_lock = threading.Lock()
 _retry_sql_em_execucao = False
 
+# ============================================================
+# ETAPA 7C REVISADA - VARREDURA PERIODICA DO BANCO LOCAL
+# Gatilho: PRODCONF todo zerado + LOGCONF CONFERIDO.
+# Nesta etapa executa o lançamento automático na Fonte de Dados Externa.
+# ============================================================
+
+_EXTERNAL_PREFLIGHT_INTERVAL_SEC = 10
+_external_preflight_lock = threading.Lock()
+_external_preflight_em_execucao = False
+_external_preflight_aprovados = set()
+
 
 def _tentar_reservar_coletor(coletor_id: str) -> bool:
     """Reserva atomicamente um coletor para impedir processamento concorrente."""
@@ -157,6 +168,142 @@ def safe_move(src: str, dst_dir: str) -> str:
 
     shutil.move(src, dst)
     return dst
+
+
+
+def _listar_documentos_candidatos_externos(settings):
+    """
+    Retorna documentos cujo estado FINAL no banco local atende ao gatilho:
+
+    - LOGCONF.StatusConf = CONFERIDO
+    - todos os registros PRODCONF do documento possuem Saldo = 0
+
+    A origem dos dados não importa:
+    Wi-Fi direto no SQL ou sincronização por TXT convergem para esta regra.
+    """
+    conn = get_connection(settings.sql)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                CAST(l.NumNF AS VARCHAR(50)) AS NumDoc,
+                COUNT(p.NumDoc) AS TotalItens,
+                SUM(
+                    CASE
+                        WHEN ISNULL(p.Saldo, 0) = 0 THEN 0
+                        ELSE 1
+                    END
+                ) AS ItensComSaldo
+            FROM dbo.logConf l
+            INNER JOIN dbo.prodConf p
+                ON CAST(p.NumDoc AS VARCHAR(50))
+                 = CAST(l.NumNF AS VARCHAR(50))
+            WHERE UPPER(LTRIM(RTRIM(ISNULL(l.StatusConf, '')))) = 'CONFERIDO'
+            GROUP BY CAST(l.NumNF AS VARCHAR(50))
+            HAVING COUNT(p.NumDoc) > 0
+               AND SUM(
+                    CASE
+                        WHEN ISNULL(p.Saldo, 0) = 0 THEN 0
+                        ELSE 1
+                    END
+               ) = 0
+            ORDER BY CAST(l.NumNF AS VARCHAR(50))
+            """
+        )
+
+        return [
+            (str(row[0]).strip(), int(row[1] or 0))
+            for row in cur.fetchall()
+        ]
+
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _executar_varredura_preflight_externo(settings):
+    """
+    ETAPA 7D - LANCAMENTO AUTOMATICO.
+
+    Processa o lançamento externo dos documentos que já atingiram o estado final
+    no banco local. Não depende da chegada de arquivos.
+
+    Segurança:
+    - não altera o fluxo LOGCONF/PRODCONF;
+    - grava somente após todas as validações e usando transação;
+    - qualquer erro externo é isolado;
+    - evita poluir logs repetindo o mesmo resultado a cada ciclo.
+    """
+    global _external_preflight_em_execucao
+
+    with _external_preflight_lock:
+        if _external_preflight_em_execucao:
+            return
+        _external_preflight_em_execucao = True
+
+    try:
+        settings_atualizados = load_settings()
+
+        try:
+            candidatos = _listar_documentos_candidatos_externos(
+                settings_atualizados
+            )
+        except Exception as e:
+            logging.exception(
+                f"[FONTE EXTERNA][VARREDURA][ERRO BANCO LOCAL] "
+                f"Motivo={e}"
+            )
+            return
+
+        if not candidatos:
+            return
+
+        try:
+            from .external_stock_sync import automatic_external_posting
+        except Exception as e:
+            logging.exception(
+                f"[FONTE EXTERNA][VARREDURA][MODULO INDISPONIVEL] "
+                f"Motivo={e} | Processamento local preservado."
+            )
+            return
+
+        for num_doc, total_itens in candidatos:
+            # Documento já aprovado nesta execução do Importer:
+            # não chama novamente o preflight e não polui os logs.
+            # Após reinício do Importer ele será validado uma vez novamente;
+            # na etapa de gravação real a proteção anti-duplicidade do banco
+            # continuará sendo a autoridade final.
+            if num_doc in _external_preflight_aprovados:
+                continue
+
+            try:
+                resultado = automatic_external_posting(num_doc)
+
+                logging.info(
+                    f"[FONTE EXTERNA][VARREDURA AUTOMATICA] "
+                    f"Documento={num_doc} | "
+                    f"Status={resultado.status} | "
+                    f"Itens={resultado.items} | "
+                    f"Mensagem={resultado.message}"
+                )
+
+                if resultado.status in ("POSTED", "ALREADY_POSTED"):
+                    _external_preflight_aprovados.add(num_doc)
+
+            except Exception as e:
+                logging.exception(
+                    f"[FONTE EXTERNA][VARREDURA][ERRO ISOLADO] "
+                    f"Documento={num_doc} | Motivo={e} | "
+                    f"Processamento local preservado."
+                )
+
+    finally:
+        with _external_preflight_lock:
+            _external_preflight_em_execucao = False
+
 
 
 def process_xml(file_path: str, settings):
@@ -1333,6 +1480,9 @@ def main():
 
     try:
         proxima_tentativa_sql = time.monotonic() + _RETRY_SQL_INTERVAL_SEC
+        proximo_preflight_externo = (
+            time.monotonic() + _EXTERNAL_PREFLIGHT_INTERVAL_SEC
+        )
 
         while True:
             time.sleep(1)
@@ -1349,6 +1499,19 @@ def main():
                         _reprocessar_pendentes_automaticamente(settings_atualizados)
                 except Exception as e:
                     logging.exception(f"[BANCO][ERRO NA VERIFICACAO PERIODICA] {e}")
+
+            if agora >= proximo_preflight_externo:
+                proximo_preflight_externo = (
+                    agora + _EXTERNAL_PREFLIGHT_INTERVAL_SEC
+                )
+                try:
+                    _executar_varredura_preflight_externo(
+                        load_settings()
+                    )
+                except Exception as e:
+                    logging.exception(
+                        f"[FONTE EXTERNA][VARREDURA][ERRO PERIODICO] {e}"
+                    )
 
     except KeyboardInterrupt:
         observer.stop()
