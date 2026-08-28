@@ -10,10 +10,11 @@ from decimal import Decimal, InvalidOperation
 import pyodbc
 
 
-VERSION_MARKER = "ETAPA_7E_LOGS_AMIGAVEIS_TESTE"
+VERSION_MARKER = "ETAPA_7F_STATUS_LANCA_012"
 TEST_DATABASE_ALLOWED = "est_ambTestes"
 MOVEMENT_TABLE = "movEstambTeste"
 MOVEMENT_TYPE = "SAIDA_CONFERENCIA"
+STATUS_TABLE = "LancamentoExternoStatus"
 
 
 @dataclass
@@ -344,6 +345,392 @@ def _write_user_log(
 
     except Exception:
         pass
+
+
+
+def _ensure_external_status_table(
+    config_path: str | None = None,
+) -> None:
+    """
+    Confirma a existência da tabela operacional dbo.LancamentoExternoStatus.
+
+    Regra de segurança:
+    - primeiro consulta OBJECT_ID;
+    - se a tabela já existe, NÃO envia nenhum CREATE TABLE ao SQL Server;
+    - somente tenta criar quando ela realmente não existe;
+    - falha nesta camada nunca bloqueia o lançamento externo.
+    """
+    conn = pyodbc.connect(
+        _build_local_conn_str(config_path),
+        timeout=5,
+        autocommit=False,
+    )
+    try:
+        cur = conn.cursor()
+
+        cur.execute(
+            "SELECT OBJECT_ID(?, 'U')",
+            (f"dbo.{STATUS_TABLE}",),
+        )
+        object_id = cur.fetchone()[0]
+
+        if object_id is not None:
+            return
+
+        cur.execute(
+            f"""
+            CREATE TABLE dbo.[{STATUS_TABLE}]
+            (
+                NumDoc              VARCHAR(50)   NOT NULL PRIMARY KEY,
+                StatusLancamento    VARCHAR(30)   NOT NULL,
+                Motivo              VARCHAR(80)   NULL,
+                Mensagem            VARCHAR(1000) NULL,
+                ItemProblema        VARCHAR(100)  NULL,
+                Localizacao         VARCHAR(100)  NULL,
+                QtdeSolicitada      DECIMAL(18,3) NULL,
+                SaldoDisponivel     DECIMAL(18,3) NULL,
+                Itens               INT           NOT NULL
+                    CONSTRAINT DF_{STATUS_TABLE}_Itens DEFAULT (0),
+                Tentativas          INT           NOT NULL
+                    CONSTRAINT DF_{STATUS_TABLE}_Tentativas DEFAULT (0),
+                PrimeiraTentativa   DATETIME2(0)  NULL,
+                UltimaTentativa     DATETIME2(0)  NULL,
+                DataLancamento      DATETIME2(0)  NULL,
+                ColetorID           VARCHAR(100)  NULL,
+                FonteExterna        VARCHAR(200)  NULL,
+                BancoExterno        VARCHAR(200)  NULL,
+                AtualizadoEm        DATETIME2(0)  NOT NULL
+                    CONSTRAINT DF_{STATUS_TABLE}_AtualizadoEm DEFAULT (SYSDATETIME())
+            )
+            """
+        )
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+
+def _update_logconf_status_lanca(
+    *,
+    num_doc: str,
+    status_lanca: str,
+    motivo: str = "",
+    config_path: str | None = None,
+) -> None:
+    """
+    Atualiza somente o status resumido do lançamento no cabeçalho LOGCONF.
+
+    Convenção usada pelo Dashboard/Kalipso:
+    0 = Pendente
+    1 = Lançado com sucesso
+    2 = Não lançado / problema
+
+    MotivoEstoque recebe somente um texto amigável quando StatusLanca = 2.
+
+    Esta atualização é não-crítica:
+    qualquer falha aqui é registrada no log técnico e NÃO interfere
+    no lançamento externo já validado.
+    """
+    num_doc = str(num_doc or "").strip()
+    if not num_doc:
+        return
+
+    try:
+        conn = pyodbc.connect(
+            _build_local_conn_str(config_path),
+            timeout=5,
+            autocommit=False,
+        )
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE dbo.logConf
+                SET
+                    StatusLanca = ?,
+                    MotivoEstoque = NULLIF(?, '')
+                WHERE CAST(NumNF AS VARCHAR(50)) = ?
+                """,
+                (
+                    str(status_lanca),
+                    str(motivo or "").strip(),
+                    num_doc,
+                ),
+            )
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    except Exception as e:
+        logging.warning(
+            f"[FONTE EXTERNA][STATUS LANCA][NAO GRAVADO] "
+            f"Documento={num_doc} | Motivo={e}"
+        )
+
+
+def _friendly_status_reason(motivo: str) -> str:
+    """Traduz o motivo técnico para o texto curto exibido no looper."""
+    labels = {
+        "SALDO_INSUFICIENTE": "Saldo insuficiente",
+        "PRODUTO_LOCAL_NAO_ENCONTRADO": "Produto/localização não encontrado",
+        "ESTOQUE_DUPLICADO": "Cadastro de estoque duplicado",
+        "ERRO_VALIDACAO_ITEM": "Erro na validação do item",
+        "FONTE_NAO_CONFIGURADA": "Fonte externa não configurada",
+        "CONFIGURACAO_INVALIDA": "Configuração externa inválida",
+        "FALHA_CONEXAO": "Falha de conexão com a fonte externa",
+        "TABELA_NAO_ENCONTRADA": "Tabela de estoque não encontrada",
+        "CONFERENCIA_INCONSISTENTE": "Conferência inconsistente",
+        "VALIDACAO_BLOQUEADA": "Lançamento bloqueado na validação",
+        "ERRO_VALIDACAO": "Erro na validação",
+        "AGUARDANDO_CONFERENCIA": "Aguardando conferência",
+        "ROLLBACK": "Lançamento cancelado e revertido",
+        "BLOCKED": "Lançamento bloqueado",
+        "BLOCKED_SIMULATION": "Lançamento bloqueado na validação",
+        "BLOCKED_DATABASE": "Banco externo não liberado",
+    }
+    return labels.get(str(motivo or "").strip(), str(motivo or "").strip())
+
+
+
+def _record_external_status(
+    *,
+    num_doc: str,
+    status: str,
+    motivo: str = "",
+    mensagem: str = "",
+    item_problema: str = "",
+    localizacao: str = "",
+    qtde_solicitada=None,
+    saldo_disponivel=None,
+    itens: int = 0,
+    coletor_id: str = "",
+    fonte_externa: str = "",
+    banco_externo: str = "",
+    data_lancamento: bool = False,
+    increment_attempt: bool = False,
+    config_path: str | None = None,
+) -> None:
+    """
+    Atualiza o estado operacional do documento para uso em Dashboard/Kalipso.
+
+    Esta função é deliberadamente não-crítica: qualquer falha gera apenas
+    warning técnico e NÃO interfere no lançamento externo.
+    """
+    num_doc = str(num_doc or "").strip()
+    if not num_doc:
+        return
+
+    try:
+        _ensure_external_status_table(config_path)
+
+        conn = pyodbc.connect(
+            _build_local_conn_str(config_path),
+            timeout=5,
+            autocommit=False,
+        )
+        try:
+            cur = conn.cursor()
+
+            cur.execute(
+                f"""
+                UPDATE dbo.[{STATUS_TABLE}]
+                SET
+                    StatusLancamento = ?,
+                    Motivo = NULLIF(?, ''),
+                    Mensagem = NULLIF(?, ''),
+                    ItemProblema = NULLIF(?, ''),
+                    Localizacao = NULLIF(?, ''),
+                    QtdeSolicitada = ?,
+                    SaldoDisponivel = ?,
+                    Itens = ?,
+                    ColetorID = NULLIF(?, ''),
+                    FonteExterna = NULLIF(?, ''),
+                    BancoExterno = NULLIF(?, ''),
+                    Tentativas = Tentativas + ?,
+                    PrimeiraTentativa =
+                        CASE
+                            WHEN ? = 1 AND PrimeiraTentativa IS NULL
+                                THEN SYSDATETIME()
+                            ELSE PrimeiraTentativa
+                        END,
+                    UltimaTentativa =
+                        CASE
+                            WHEN ? = 1 THEN SYSDATETIME()
+                            ELSE UltimaTentativa
+                        END,
+                    DataLancamento =
+                        CASE
+                            WHEN ? = 1 THEN SYSDATETIME()
+                            ELSE DataLancamento
+                        END,
+                    AtualizadoEm = SYSDATETIME()
+                WHERE NumDoc = ?
+                """,
+                (
+                    status,
+                    motivo,
+                    mensagem,
+                    item_problema,
+                    localizacao,
+                    qtde_solicitada,
+                    saldo_disponivel,
+                    int(itens or 0),
+                    coletor_id,
+                    fonte_externa,
+                    banco_externo,
+                    1 if increment_attempt else 0,
+                    1 if increment_attempt else 0,
+                    1 if increment_attempt else 0,
+                    1 if data_lancamento else 0,
+                    num_doc,
+                ),
+            )
+
+            if cur.rowcount == 0:
+                cur.execute(
+                    f"""
+                    INSERT INTO dbo.[{STATUS_TABLE}]
+                    (
+                        NumDoc,
+                        StatusLancamento,
+                        Motivo,
+                        Mensagem,
+                        ItemProblema,
+                        Localizacao,
+                        QtdeSolicitada,
+                        SaldoDisponivel,
+                        Itens,
+                        Tentativas,
+                        PrimeiraTentativa,
+                        UltimaTentativa,
+                        DataLancamento,
+                        ColetorID,
+                        FonteExterna,
+                        BancoExterno,
+                        AtualizadoEm
+                    )
+                    VALUES
+                    (
+                        ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''),
+                        NULLIF(?, ''), ?, ?, ?, ?,
+                        CASE WHEN ? = 1 THEN SYSDATETIME() ELSE NULL END,
+                        CASE WHEN ? = 1 THEN SYSDATETIME() ELSE NULL END,
+                        CASE WHEN ? = 1 THEN SYSDATETIME() ELSE NULL END,
+                        NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''),
+                        SYSDATETIME()
+                    )
+                    """,
+                    (
+                        num_doc,
+                        status,
+                        motivo,
+                        mensagem,
+                        item_problema,
+                        localizacao,
+                        qtde_solicitada,
+                        saldo_disponivel,
+                        int(itens or 0),
+                        1 if increment_attempt else 0,
+                        1 if increment_attempt else 0,
+                        1 if increment_attempt else 0,
+                        1 if data_lancamento else 0,
+                        coletor_id,
+                        fonte_externa,
+                        banco_externo,
+                    ),
+                )
+
+            conn.commit()
+
+            # Atualiza também o resumo exibido pelo looper/Kalipso.
+            # StatusLanca: 0=Pendente, 1=Lançado, 2=Não lançado/problema.
+            if status == "LANCADO":
+                _update_logconf_status_lanca(
+                    num_doc=num_doc,
+                    status_lanca="1",
+                    motivo="",
+                    config_path=config_path,
+                )
+            elif status == "NAO_LANCADO":
+                _update_logconf_status_lanca(
+                    num_doc=num_doc,
+                    status_lanca="2",
+                    motivo=_friendly_status_reason(motivo),
+                    config_path=config_path,
+                )
+            elif status == "EM_VALIDACAO":
+                _update_logconf_status_lanca(
+                    num_doc=num_doc,
+                    status_lanca="0",
+                    motivo="",
+                    config_path=config_path,
+                )
+
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    except Exception as e:
+        logging.warning(
+            f"[FONTE EXTERNA][STATUS DASHBOARD][NAO GRAVADO] "
+            f"Documento={num_doc} | Motivo={e}"
+        )
+
+
+def _first_simulation_problem(
+    simulation: SimulationResult,
+):
+    """Extrai o primeiro problema para exibir na tabela de status."""
+    for item in simulation.items:
+        if item.status != "OK":
+            motivo_map = {
+                "NOT_FOUND": "PRODUTO_LOCAL_NAO_ENCONTRADO",
+                "DUPLICATE": "ESTOQUE_DUPLICADO",
+                "INSUFFICIENT_STOCK": "SALDO_INSUFICIENTE",
+                "ERROR": "ERRO_VALIDACAO_ITEM",
+            }
+            return {
+                "motivo": motivo_map.get(item.status, "VALIDACAO_BLOQUEADA"),
+                "item": item.cod_prod or item.gtin or "",
+                "local": item.localizacao or "",
+                "qtde": item.qtd_lida,
+                "saldo": item.saldo_atual,
+            }
+
+    return {
+        "motivo": "VALIDACAO_BLOQUEADA",
+        "item": "",
+        "local": "",
+        "qtde": None,
+        "saldo": None,
+    }
+
 
 
 def test_external_connection(
@@ -1034,24 +1421,6 @@ def post_external_test_transaction(
                 pass
 
 
-
-def _friendly_simulation_issue(item: SimulationItem) -> str:
-    """Traduz status técnico da simulação somente para exibição ao usuário."""
-    labels = {
-        "NOT_FOUND": "Produto ou localização não encontrado no estoque",
-        "DUPLICATE": "Mais de um registro de estoque encontrado para o produto/localização",
-        "INSUFFICIENT_STOCK": "Saldo insuficiente no estoque",
-        "ERROR": "Não foi possível validar o item",
-    }
-
-    referencia = item.cod_prod or item.gtin or "Item sem identificação"
-    local = item.localizacao or "localização não informada"
-    titulo = labels.get(item.status, "Item não liberado para lançamento")
-
-    return f"{referencia} / {local}: {titulo}. {item.message}".strip()
-
-
-
 def automatic_external_preflight(
     num_doc: str,
     config_path: str | None = None,
@@ -1206,7 +1575,10 @@ def automatic_external_preflight(
         details = []
         for item in simulation.items:
             if item.status != "OK":
-                details.append(_friendly_simulation_issue(item))
+                details.append(
+                    f"{item.cod_prod or item.gtin} / {item.localizacao}: "
+                    f"{item.status} - {item.message}"
+                )
 
         _write_user_log(
             level="ERRO",
@@ -1266,9 +1638,61 @@ def automatic_external_posting(
     """
     num_doc = str(num_doc).strip()
 
+    source = load_external_data_source(config_path)
+
+    _record_external_status(
+        num_doc=num_doc,
+        status="EM_VALIDACAO",
+        motivo="",
+        mensagem="Validando lançamento na Fonte de Dados Externa.",
+        itens=0,
+        fonte_externa=source.name if source.configured else "",
+        banco_externo=source.database if source.configured else "",
+        increment_attempt=True,
+        config_path=config_path,
+    )
+
     preflight = automatic_external_preflight(num_doc, config_path)
 
     if preflight.status != "READY_TO_POST":
+        motivo_map = {
+            "NO_CONFIG": "FONTE_NAO_CONFIGURADA",
+            "INVALID_CONFIG": "CONFIGURACAO_INVALIDA",
+            "CONNECTION_ERROR": "FALHA_CONEXAO",
+            "TABLE_NOT_FOUND": "TABELA_NAO_ENCONTRADA",
+            "INCONSISTENT": "CONFERENCIA_INCONSISTENTE",
+            "SIMULATION_ERROR": "VALIDACAO_BLOQUEADA",
+            "ERROR": "ERRO_VALIDACAO",
+            "WAITING": "AGUARDANDO_CONFERENCIA",
+        }
+
+        problem = {
+            "motivo": motivo_map.get(preflight.status, preflight.status),
+            "item": "",
+            "local": "",
+            "qtde": None,
+            "saldo": None,
+        }
+
+        if preflight.status == "SIMULATION_ERROR":
+            simulation = simulate_external_posting(num_doc, config_path)
+            problem = _first_simulation_problem(simulation)
+
+        _record_external_status(
+            num_doc=num_doc,
+            status="NAO_LANCADO",
+            motivo=problem["motivo"],
+            mensagem=preflight.message,
+            item_problema=problem["item"],
+            localizacao=problem["local"],
+            qtde_solicitada=problem["qtde"],
+            saldo_disponivel=problem["saldo"],
+            itens=preflight.items,
+            fonte_externa=source.name if source.configured else "",
+            banco_externo=source.database if source.configured else "",
+            config_path=config_path,
+        )
+
         return preflight
 
     posting = post_external_test_transaction(num_doc, config_path)
@@ -1283,6 +1707,18 @@ def automatic_external_posting(
             f"Documento={num_doc} | Itens={posting.items} | "
             f"Resultado=SUCESSO"
         )
+        _record_external_status(
+            num_doc=num_doc,
+            status="LANCADO",
+            motivo="SUCESSO",
+            mensagem=message,
+            itens=posting.items,
+            fonte_externa=source.name,
+            banco_externo=source.database,
+            data_lancamento=True,
+            config_path=config_path,
+        )
+
         _write_user_log(
             level="OK",
             title="Lançamento de estoque realizado com sucesso",
@@ -1314,6 +1750,18 @@ def automatic_external_posting(
             f"[FONTE EXTERNA][DOCUMENTO JA LANCADO] "
             f"Documento={num_doc} | Nenhuma nova gravacao executada."
         )
+        _record_external_status(
+            num_doc=num_doc,
+            status="LANCADO",
+            motivo="JA_LANCADO",
+            mensagem=message,
+            itens=0,
+            fonte_externa=source.name,
+            banco_externo=source.database,
+            data_lancamento=False,
+            config_path=config_path,
+        )
+
         _write_user_log(
             level="INFO",
             title="Documento já processado anteriormente",
@@ -1323,7 +1771,7 @@ def automatic_external_posting(
                 "com sucesso para este documento."
             ),
             what_to_do="Nenhuma ação necessária.",
-            detail="Nenhuma nova baixa foi realizada; o estoque permaneceu inalterado.",
+            detail="Proteção contra lançamento duplicado acionada.",
             config_path=config_path,
         )
         return ExternalSyncResult(
@@ -1339,6 +1787,17 @@ def automatic_external_posting(
         f"Documento={num_doc} | Status={posting.status} | "
         f"Motivo={message}"
     )
+    _record_external_status(
+        num_doc=num_doc,
+        status="NAO_LANCADO",
+        motivo=posting.status,
+        mensagem=message,
+        itens=posting.items,
+        fonte_externa=source.name if source.configured else "",
+        banco_externo=source.database if source.configured else "",
+        config_path=config_path,
+    )
+
     _write_user_log(
         level="ERRO",
         title="Lançamento de estoque não realizado",
@@ -1346,9 +1805,9 @@ def automatic_external_posting(
         why=message,
         what_to_do=(
             "Verifique o Log Técnico e a Fonte de Dados Externa. "
-            "A operação foi cancelada para evitar atualização parcial do estoque."
+            "Se houve falha durante a transação, o rollback preservou o estoque."
         ),
-        detail=f"Status técnico={posting.status}. Nenhuma alteração parcial foi confirmada.",
+        detail=f"Status técnico={posting.status}.",
         config_path=config_path,
     )
     return ExternalSyncResult(
@@ -1366,7 +1825,7 @@ def sync_completed_document(
 ) -> ExternalSyncResult:
     """
     Compatibilidade temporária.
-    Função de compatibilidade mantida sem alteração funcional.
+    Na Etapa 7A redireciona para o preflight automático, SEM GRAVAÇÃO.
     """
     return automatic_external_preflight(num_doc)
 
