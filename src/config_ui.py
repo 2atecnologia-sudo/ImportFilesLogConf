@@ -634,6 +634,7 @@ class ConfigUI(tk.Tk):
                 ("datahora", "Data/Hora", 145),
                 ("operacao", "Operação", 105),
                 ("documento", "Documento", 110),
+                ("cliente", "Cliente", 180),
                 ("terminal", "Terminal", 90),
                 ("resultado", "Resultado", 90),
                 ("detalhe", "Detalhe", 260),
@@ -1468,6 +1469,31 @@ class ConfigUI(tk.Tk):
         try:
             columns, rows = self._read_test_table("movEstambTeste")
 
+            # Nome do cliente vem do banco local logConf, relacionando
+            # Documento da movimentação com NumNF da conferência.
+            clientes_por_documento = {}
+            conn_local = None
+            try:
+                self.cfg = load_cfg()
+                conn_local = pyodbc.connect(
+                    build_conn_str(self.cfg),
+                    timeout=5,
+                )
+                cur_local = conn_local.cursor()
+                cur_local.execute(
+                    """
+                    SELECT NumNF, NomeCli
+                    FROM dbo.logConf
+                    """
+                )
+                for num_nf, nome_cli in cur_local.fetchall():
+                    chave = str(num_nf or "").strip()
+                    if chave and chave not in clientes_por_documento:
+                        clientes_por_documento[chave] = str(nome_cli or "").strip()
+            finally:
+                if conn_local is not None:
+                    conn_local.close()
+
             # Exibe primeiro as movimentações mais recentes.
             # Prioriza DATA_HORA e usa o ID como desempate quando existir.
             normalized_columns = {
@@ -1524,6 +1550,12 @@ class ConfigUI(tk.Tk):
                     self._column_value(m, ["DATA_HORA", "DataHora", "DataMovimento", "Data", "DtMovimento"]),
                     self._column_value(m, ["TIPO_OPERACAO", "Operacao", "TipoOperacao", "Movimento"]),
                     self._column_value(m, ["NUM_DOCUMENTO", "Documento", "NumDoc", "NumNota", "NF"]),
+                    clientes_por_documento.get(
+                        str(self._column_value(
+                            m, ["NUM_DOCUMENTO", "Documento", "NumDoc", "NumNota", "NF"]
+                        ) or "").strip(),
+                        "",
+                    ),
                     self._column_value(m, ["IDENT_TERMINAL", "Terminal", "ColetorID", "TerminalID"]),
                     self._column_value(m, ["RESULTADO", "Resultado", "Status"]),
                     detalhe,
