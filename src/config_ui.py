@@ -20,8 +20,8 @@ if getattr(sys, "frozen", False):
 else:
     BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
-APP_VERSION = "1.0.1"
-BUILD_DATE = "27/08/2026 11:23"
+APP_VERSION = "1.0.2"
+BUILD_DATE = "28/08/2026 20:30"
 
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
 EXAMPLE_PATH = os.path.join(BASE_DIR, "config.ini.example")
@@ -526,10 +526,35 @@ class ConfigUI(tk.Tk):
         ttk.Label(
             container,
             text=(
-                "Consulta somente leitura do ambiente de testes. "
-                "Nenhum INSERT, UPDATE ou DELETE é executado nesta tela."
+                "Ambiente exclusivo para testes e demonstrações. "
+                "As configurações de rede, SQL, pastas e conexões são preservadas."
             ),
         ).pack(anchor="w", pady=(0, 8))
+
+        reset_box = ttk.LabelFrame(container, text="Ambiente limpo para nova demonstração")
+        reset_box.pack(fill="x", pady=(0, 8))
+
+        ttk.Label(
+            reset_box,
+            text=(
+                "Salvar Padrão guarda uma cópia do estoque fictício atual. "
+                "Resetar Ambiente apaga somente os DADOS de teste e restaura esse estoque padrão."
+            ),
+            wraplength=600,
+            justify="left",
+        ).pack(side="left", padx=10, pady=9)
+
+        ttk.Button(
+            reset_box,
+            text="Carregar Banco de Exemplo",
+            command=self._load_example_stock,
+        ).pack(side="right", padx=(6, 10), pady=9)
+
+        ttk.Button(
+            reset_box,
+            text="Resetar Ambiente",
+            command=self._reset_test_environment,
+        ).pack(side="right", padx=6, pady=9)
 
         # Seleção do arquivo de carga do estoque de teste.
         file_box = ttk.LabelFrame(container, text="Arquivo de carga do estoque")
@@ -909,6 +934,34 @@ class ConfigUI(tk.Tk):
             cur.fast_executemany = True
             cur.executemany(sql, rows)
 
+            # O último estoque importado passa automaticamente a ser o
+            # ESTOQUE PADRÃO da demonstração. Esta cópia não sofre baixas.
+            cur.execute(
+                """
+                IF OBJECT_ID('dbo.ESTOQUE_BASE_DEMO', 'U') IS NULL
+                BEGIN
+                    CREATE TABLE dbo.ESTOQUE_BASE_DEMO
+                    (
+                        COD_ITEM         VARCHAR(100)  NULL,
+                        COD_BARRAS       VARCHAR(100)  NULL,
+                        DESCRICAO_ITEM   VARCHAR(500)  NULL,
+                        LOCAL_ESTOQUE    VARCHAR(100)  NULL,
+                        SALDO_ATUAL      DECIMAL(18,3) NOT NULL
+                    );
+                END
+                """
+            )
+            cur.execute("DELETE FROM dbo.ESTOQUE_BASE_DEMO")
+            cur.execute(
+                """
+                INSERT INTO dbo.ESTOQUE_BASE_DEMO
+                    (COD_ITEM, COD_BARRAS, DESCRICAO_ITEM, LOCAL_ESTOQUE, SALDO_ATUAL)
+                SELECT
+                    COD_ITEM, COD_BARRAS, DESCRICAO_ITEM, LOCAL_ESTOQUE, SALDO_ATUAL
+                FROM dbo.ESTOQUE
+                """
+            )
+
             # Registra a origem de cada posição de estoque como CARGA INICIAL.
             # Isso cria um extrato auditável sem alterar o saldo importado.
             sql_mov = """
@@ -966,7 +1019,8 @@ class ConfigUI(tk.Tk):
                 "Importar Estoque",
                 f"Importação concluída com sucesso.\n\n"
                 f"Posições de estoque importadas: {len(rows)}\n"
-                f"Lançamentos de SALDO INICIAL: {len(rows)}",
+                f"Lançamentos de SALDO INICIAL: {len(rows)}\n"
+                f"Estoque Padrão da demonstração: SALVO",
                 parent=self,
             )
 
@@ -990,6 +1044,300 @@ class ConfigUI(tk.Tk):
                 "Falha na importação",
                 "Nenhum registro foi confirmado no banco.\n\n"
                 f"Detalhe: {detail}",
+                parent=self,
+            )
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def _build_test_environment_write_conn_str(self):
+        """Conexão de escrita SOMENTE para o banco fixo est_ambTestes."""
+        return self._build_test_environment_conn_str().replace(
+            "ApplicationIntent=ReadOnly;", ""
+        )
+
+    def _save_test_stock_as_default(self):
+        """Salva o estoque fictício atual como modelo para futuros resets."""
+        if self._importer_rodando():
+            messagebox.showwarning(
+                "Ambiente de Testes",
+                "Pare o Importador antes de salvar o Estoque Padrão.",
+                parent=self,
+            )
+            return
+
+        if not messagebox.askyesno(
+            "Salvar Estoque Padrão?",
+            "O estoque ATUAL será guardado como modelo dos próximos resets.\n\n"
+            "Rede, SQL e conexões NÃO serão alterados.\n\nContinuar?",
+            parent=self,
+        ):
+            return
+
+        conn = None
+        try:
+            conn = pyodbc.connect(
+                self._build_test_environment_write_conn_str(),
+                timeout=5,
+                autocommit=False,
+            )
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM dbo.ESTOQUE")
+            total = int(cur.fetchone()[0])
+            if total <= 0:
+                raise RuntimeError("dbo.ESTOQUE está vazia.")
+
+            cur.execute(
+                """
+                IF OBJECT_ID('dbo.ESTOQUE_BASE_DEMO', 'U') IS NULL
+                BEGIN
+                    CREATE TABLE dbo.ESTOQUE_BASE_DEMO
+                    (
+                        COD_ITEM VARCHAR(100) NULL,
+                        COD_BARRAS VARCHAR(100) NULL,
+                        DESCRICAO_ITEM VARCHAR(500) NULL,
+                        LOCAL_ESTOQUE VARCHAR(100) NULL,
+                        SALDO_ATUAL DECIMAL(18,3) NOT NULL
+                    );
+                END
+                """
+            )
+            cur.execute("DELETE FROM dbo.ESTOQUE_BASE_DEMO")
+            cur.execute(
+                """
+                INSERT INTO dbo.ESTOQUE_BASE_DEMO
+                    (COD_ITEM, COD_BARRAS, DESCRICAO_ITEM, LOCAL_ESTOQUE, SALDO_ATUAL)
+                SELECT COD_ITEM, COD_BARRAS, DESCRICAO_ITEM, LOCAL_ESTOQUE, SALDO_ATUAL
+                FROM dbo.ESTOQUE
+                """
+            )
+            conn.commit()
+
+            self._write_test_user_log(
+                "OK",
+                "Estoque Padrão salvo",
+                f"{total} posição(ões) preservadas como modelo de reset.",
+                "Use Resetar Ambiente para voltar a este estado.",
+            )
+            messagebox.showinfo(
+                "Estoque Padrão salvo",
+                f"Estoque Padrão salvo com sucesso.\n\nPosições: {total}\n"
+                "Configurações preservadas.",
+                parent=self,
+            )
+        except Exception as e:
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            messagebox.showerror(
+                "Falha ao salvar Estoque Padrão",
+                f"Nenhuma alteração confirmada.\n\n{e}",
+                parent=self,
+            )
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def _reset_test_environment(self):
+        """Limpa os dados de teste, preservando todas as configurações."""
+        if self._importer_rodando():
+            messagebox.showwarning(
+                "Resetar Ambiente",
+                "Pare o Importador antes de executar o reset.",
+                parent=self,
+            )
+            return
+
+        if not messagebox.askyesno(
+            "Resetar Ambiente de Testes?",
+            "Serão eliminados:\n"
+            "• estoque de teste;\n"
+            "• movimentações;\n"
+            "• logConf;\n"
+            "• prodConf;\n"
+            "• erros de conferência.\n\n"
+            "Configurações SQL, rede, ERP, usuário, senha e pastas serão preservadas.\n\n"
+            "Deseja continuar?",
+            parent=self,
+        ):
+            return
+
+        estoque_conn = None
+        local_conn = None
+        try:
+            estoque_conn = pyodbc.connect(
+                self._build_test_environment_write_conn_str(),
+                timeout=5,
+                autocommit=False,
+            )
+            ec = estoque_conn.cursor()
+            ec.execute("DELETE FROM dbo.ESTOQUE")
+            ec.execute(
+                """
+                IF OBJECT_ID('dbo.movEstambTeste', 'U') IS NOT NULL
+                    DELETE FROM dbo.movEstambTeste
+                """
+            )
+
+            self.cfg = load_cfg()
+            local_conn = pyodbc.connect(
+                build_conn_str(self.cfg),
+                timeout=5,
+                autocommit=False,
+            )
+            lc = local_conn.cursor()
+
+            limpas = []
+            for tabela in ("scanerroconf", "prodConf", "logConf"):
+                lc.execute("SELECT OBJECT_ID(?, 'U')", (f"dbo.{tabela}",))
+                if lc.fetchone()[0] is not None:
+                    lc.execute(f"DELETE FROM dbo.[{tabela}]")
+                    limpas.append(tabela)
+
+            estoque_conn.commit()
+            local_conn.commit()
+
+            self._write_test_user_log(
+                "OK",
+                "RESET DO AMBIENTE DE TESTES",
+                "Estoque, movimentações, conferências e erros foram eliminados.",
+                "Importe um arquivo de estoque ou carregue o Banco de Exemplo para iniciar um novo teste.",
+                [
+                    "Configurações SQL/rede/ERP preservadas.",
+                    "Tabelas locais limpas: " + (", ".join(limpas) if limpas else "nenhuma encontrada"),
+                ],
+            )
+
+            self.test_file_status.set(
+                "Estoque de teste vazio. Importe um arquivo ou carregue o Banco de Exemplo."
+            )
+            self._refresh_test_stock()
+            self._refresh_test_moves()
+
+            messagebox.showinfo(
+                "Ambiente resetado",
+                "RESET concluído com sucesso.\n\n"
+                "O ambiente está vazio e pronto para um novo cenário.\n\n"
+                "Importe um arquivo de estoque ou clique em 'Carregar Banco de Exemplo'.\n\n"
+                "Configurações e conexões foram preservadas.",
+                parent=self,
+            )
+
+        except Exception as e:
+            if estoque_conn is not None:
+                try:
+                    estoque_conn.rollback()
+                except Exception:
+                    pass
+            if local_conn is not None:
+                try:
+                    local_conn.rollback()
+                except Exception:
+                    pass
+
+            self._write_test_user_log(
+                "ERRO",
+                "RESET DO AMBIENTE DE TESTES",
+                "Reset não concluído.",
+                "Nenhuma configuração foi alterada.",
+                [str(e)],
+            )
+            messagebox.showerror(
+                "Falha no RESET",
+                "O reset não foi concluído. As transações abertas foram revertidas.\n\n"
+                f"Detalhe: {e}",
+                parent=self,
+            )
+        finally:
+            for conn in (estoque_conn, local_conn):
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+    def _load_example_stock(self):
+        """Carrega o estoque DEMO salvo em ESTOQUE_BASE_DEMO."""
+        if self._importer_rodando():
+            messagebox.showwarning(
+                "Banco de Exemplo",
+                "Pare o Importador antes de carregar o Banco de Exemplo.",
+                parent=self,
+            )
+            return
+
+        conn = None
+        try:
+            conn = pyodbc.connect(
+                self._build_test_environment_write_conn_str(),
+                timeout=5,
+                autocommit=False,
+            )
+            cur = conn.cursor()
+
+            cur.execute("SELECT OBJECT_ID('dbo.ESTOQUE_BASE_DEMO', 'U')")
+            if cur.fetchone()[0] is None:
+                raise RuntimeError("Banco de Exemplo ainda não está disponível.")
+
+            cur.execute("SELECT COUNT(*) FROM dbo.ESTOQUE_BASE_DEMO")
+            total = int(cur.fetchone()[0])
+            if total <= 0:
+                raise RuntimeError("Banco de Exemplo está vazio.")
+
+            cur.execute("DELETE FROM dbo.ESTOQUE")
+            cur.execute(
+                """
+                INSERT INTO dbo.ESTOQUE
+                    (COD_ITEM, COD_BARRAS, DESCRICAO_ITEM, LOCAL_ESTOQUE, SALDO_ATUAL)
+                SELECT
+                    COD_ITEM, COD_BARRAS, DESCRICAO_ITEM, LOCAL_ESTOQUE, SALDO_ATUAL
+                FROM dbo.ESTOQUE_BASE_DEMO
+                """
+            )
+            conn.commit()
+
+            self._write_test_user_log(
+                "OK",
+                "BANCO DE EXEMPLO CARREGADO",
+                f"{total} posição(ões) de estoque carregadas.",
+                "Ambiente pronto para demonstração.",
+            )
+            self.test_file_status.set(
+                f"Banco de Exemplo carregado: {total} posição(ões)."
+            )
+            self._refresh_test_stock()
+
+            messagebox.showinfo(
+                "Banco de Exemplo",
+                f"Banco de Exemplo carregado com sucesso.\n\n"
+                f"Posições de estoque: {total}\n\n"
+                "Ambiente pronto para testes.",
+                parent=self,
+            )
+        except Exception as e:
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            self._write_test_user_log(
+                "ERRO",
+                "BANCO DE EXEMPLO",
+                "Não foi possível carregar o Banco de Exemplo.",
+                "Verifique o detalhe técnico.",
+                [str(e)],
+            )
+            messagebox.showerror(
+                "Banco de Exemplo",
+                f"Não foi possível carregar o Banco de Exemplo.\n\n{e}",
                 parent=self,
             )
         finally:

@@ -209,6 +209,111 @@ def _update_prodconf(cur, reg, coletor_id: str = ""):
 
 
 
+def _insert_prodconf(cur, reg, coletor_id: str = ""):
+    """
+    Insere um item novo de PRODCONF espelhando o retorno do coletor.
+
+    O layout recebido possui:
+      NumDoc, QtdeLido, Saldo, EAN, CodProd, Localizacao, Status.
+
+    Para um registro novo, QtdeDoc é reconstruída como:
+      QtdeDoc = QtdeLido + Saldo
+
+    NomeCli é obtido do cabeçalho dbo.logConf já criado pelo NFLOG.
+    """
+    ean = _texto(reg.ean)
+    cod = _texto(reg.cod_prod)
+
+    if not ean and not cod:
+        raise SyncWriteError(
+            f"PRODCONF linha {reg.linha}: EAN/GTIN e CodProd vazios."
+        )
+
+    cur.execute(
+        """
+        SELECT TOP 1 NomeCli
+        FROM dbo.logConf
+        WHERE NumNF = ?
+        """,
+        (int(reg.num_doc),),
+    )
+    row_log = cur.fetchone()
+
+    if row_log is None:
+        raise SyncWriteError(
+            f"PRODCONF linha={reg.linha} NumDoc={reg.num_doc}: "
+            f"cabeçalho LOGCONF não encontrado."
+        )
+
+    nome_cli = _texto(row_log.NomeCli)
+    qtde_lido = _decimal_ou_none(reg.qtde_lido)
+    saldo = _decimal_ou_none(reg.saldo)
+
+    if qtde_lido is None:
+        qtde_lido = Decimal("0")
+    if saldo is None:
+        saldo = Decimal("0")
+
+    qtde_doc = qtde_lido + saldo
+
+    # GTIN historicamente é numérico na tabela. Quando o arquivo traz
+    # somente CodProd, mantemos GTIN=0 como já era feito na carga antiga.
+    if ean:
+        try:
+            gtin_db = int(ean)
+        except ValueError as exc:
+            raise SyncWriteError(
+                f"PRODCONF linha {reg.linha}: GTIN inválido: {ean!r}."
+            ) from exc
+    else:
+        gtin_db = 0
+
+    agora = datetime.now()
+
+    cur.execute(
+        """
+        INSERT INTO dbo.prodConf
+            (
+                NumDoc,
+                NomeCli,
+                DataImp,
+                CodProd,
+                GTIN,
+                DescProd,
+                QtdeDoc,
+                QtdeLido,
+                Saldo,
+                Localizacao,
+                Status,
+                DataeHora,
+                ColetorID
+            )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(reg.num_doc),
+            nome_cli,
+            agora.date(),
+            cod,
+            gtin_db,
+            "",
+            qtde_doc,
+            qtde_lido,
+            saldo,
+            _texto(reg.localizacao) or None,
+            _texto(reg.status).upper(),
+            agora.strftime("%Y-%m-%d %H:%M:%S"),
+            _texto(coletor_id) or None,
+        ),
+    )
+
+    if cur.rowcount != 1:
+        raise SyncWriteError(
+            f"PRODCONF linha {reg.linha}: INSERT afetou "
+            f"{cur.rowcount} registros; esperado=1."
+        )
+
+
 def _saldo_exatamente_zero(valor) -> bool:
     if valor is None:
         return False
@@ -400,18 +505,44 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf, colet
             )
             rows = cur.fetchall()
 
-            if len(rows) != 1:
+            if len(rows) > 1:
                 raise SyncWriteError(
-                    f"LOGCONF NumNF={item['num_nf']}: encontrados={len(rows)}; esperado=1."
+                    f"LOGCONF NumNF={item['num_nf']}: encontrados={len(rows)}; esperado=0 ou 1."
+                )
+
+            if len(rows) == 0:
+                # Documento novo vindo no arquivo acumulado do coletor.
+                # LOGCONF não traz NomeCli no layout de sincronização; quando
+                # não existe cabeçalho prévio (ex.: NFLOG), criamos o mínimo
+                # necessário e a atualização logo abaixo completa a conferência.
+                cur.execute(
+                    """
+                    INSERT INTO dbo.logConf (NumNF, NomeCli, StatusConf, ColetorID)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        int(item["num_nf"]),
+                        "",
+                        "AGUARDANDO",
+                        _texto(coletor_id) or None,
+                    ),
+                )
+                if cur.rowcount != 1:
+                    raise SyncWriteError(
+                        f"LOGCONF NumNF={item['num_nf']}: INSERT afetou "
+                        f"{cur.rowcount} registros; esperado=1."
+                    )
+                logging.info(
+                    f"[SYNC][LOGCONF][NOVO INSERIDO] NumNF={item['num_nf']}"
                 )
 
         for reg in registros_prodconf:
             rows = _buscar_prodconf(cur, reg, lock=True)
 
-            if len(rows) != 1:
+            if len(rows) > 1:
                 raise SyncWriteError(
                     f"PRODCONF linha={reg.linha} NumDoc={reg.num_doc}: "
-                    f"encontrados={len(rows)}; esperado=1."
+                    f"encontrados={len(rows)}; esperado=0 ou 1."
                 )
 
         for item in logconf:
@@ -446,7 +577,18 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf, colet
             resultado.logconf_atualizados += 1
 
         for reg in registros_prodconf:
-            _update_prodconf(cur, reg, coletor_id)
+            rows = _buscar_prodconf(cur, reg, lock=True)
+
+            if len(rows) == 0:
+                _insert_prodconf(cur, reg, coletor_id)
+            elif len(rows) == 1:
+                _update_prodconf(cur, reg, coletor_id)
+            else:
+                raise SyncWriteError(
+                    f"PRODCONF linha={reg.linha} NumDoc={reg.num_doc}: "
+                    f"busca ambígua com {len(rows)} registros."
+                )
+
             resultado.prodconf_atualizados += 1
 
         for item in logconf:

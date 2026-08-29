@@ -17,6 +17,23 @@ MOVEMENT_TYPE = "SAIDA_CONFERENCIA"
 STATUS_TABLE = "LancamentoExternoStatus"
 
 
+def _allowed_test_database(config_path: str | None = None) -> str:
+    """
+    Banco permitido para gravação em MODO DEMO.
+    Mantém a trava de segurança, mas deixa o nome do banco portátil/configurável.
+    """
+    try:
+        cfg = _load_cfg(config_path)
+        value = cfg.get(
+            "test_environment",
+            "database",
+            fallback=TEST_DATABASE_ALLOWED,
+        ).strip()
+        return value or TEST_DATABASE_ALLOWED
+    except Exception:
+        return TEST_DATABASE_ALLOWED
+
+
 @dataclass
 class ExternalSyncResult:
     status: str
@@ -943,15 +960,24 @@ def _read_local_items(
         cur.execute(
             """
             SELECT
-                CodProd,
-                GTIN,
-                DescProd,
-                QtdeLido,
-                Localizacao,
-                ColetorID
-            FROM dbo.prodConf
-            WHERE CAST(NumDoc AS VARCHAR(50)) = ?
-            ORDER BY CodProd, GTIN, Localizacao
+                pc.CodProd,
+                pc.GTIN,
+                pc.DescProd,
+                pc.QtdeLido,
+                pc.Localizacao,
+                COALESCE(
+                    NULLIF(LTRIM(RTRIM(pc.ColetorID)), ''),
+                    (
+                        SELECT TOP 1 lc.ColetorID
+                        FROM dbo.logConf AS lc
+                        WHERE CAST(lc.NumNF AS VARCHAR(50)) =
+                              CAST(pc.NumDoc AS VARCHAR(50))
+                          AND NULLIF(LTRIM(RTRIM(lc.ColetorID)), '') IS NOT NULL
+                    )
+                ) AS ColetorID
+            FROM dbo.prodConf AS pc
+            WHERE CAST(pc.NumDoc AS VARCHAR(50)) = ?
+            ORDER BY pc.CodProd, pc.GTIN, pc.Localizacao
             """,
             (str(num_doc),),
         )
@@ -1193,14 +1219,16 @@ def post_external_test_transaction(
     if not source.valid:
         return PostingResult("INVALID_CONFIG", num_doc, 0, source.error)
 
-    if source.database.lower() != TEST_DATABASE_ALLOWED.lower():
+    allowed_test_database = _allowed_test_database(config_path)
+
+    if source.database.lower() != allowed_test_database.lower():
         return PostingResult(
             "BLOCKED_DATABASE",
             num_doc,
             0,
             (
-                f"GRAVAÇÃO BLOQUEADA: esta função de teste só permite o banco "
-                f"{TEST_DATABASE_ALLOWED}. Banco configurado={source.database}."
+                f"GRAVAÇÃO BLOQUEADA: o modo DEMO só permite o banco "
+                f"{allowed_test_database}. Banco configurado={source.database}."
             ),
         )
 
@@ -1634,7 +1662,7 @@ def automatic_external_posting(
     5) qualquer falha preserva o banco via rollback.
 
     A própria post_external_test_transaction() bloqueia qualquer banco
-    diferente de est_ambTestes.
+    diferente do banco configurado em [test_environment].
     """
     num_doc = str(num_doc).strip()
 
