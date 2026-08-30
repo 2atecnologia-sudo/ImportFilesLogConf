@@ -1,0 +1,234 @@
+[1mdiff --git a/src/main.py b/src/main.py[m
+[1mindex f0ec96d..ca8621b 100644[m
+[1m--- a/src/main.py[m
+[1m+++ b/src/main.py[m
+[36m@@ -43,6 +43,25 @@[m [m_RETRY_SQL_INTERVAL_SEC = 30[m
+ _retry_sql_lock = threading.Lock()[m
+ _retry_sql_em_execucao = False[m
+ [m
+[32m+[m[32m# ============================================================[m
+[32m+[m[32m# ETAPA 7C REVISADA - VARREDURA PERIODICA DO BANCO LOCAL[m
+[32m+[m[32m# Gatilho: PRODCONF todo zerado + LOGCONF CONFERIDO.[m
+[32m+[m[32m# Nesta etapa executa o lançamento automático na Fonte de Dados Externa.[m
+[32m+[m[32m# ============================================================[m
+[32m+[m
+[32m+[m[32m_EXTERNAL_PREFLIGHT_INTERVAL_SEC = 10[m
+[32m+[m
+[32m+[m[32m# Erros de negócio (ex.: saldo insuficiente, produto/localização inexistente)[m
+[32m+[m[32m# não precisam consultar a fonte externa a cada 10 segundos.[m
+[32m+[m[32m# Continuam sendo reavaliados automaticamente para permitir recuperação[m
+[32m+[m[32m# após correção de saldo/cadastro no sistema externo.[m
+[32m+[m[32m_EXTERNAL_BUSINESS_RETRY_SEC = 300  # 5 minutos[m
+[32m+[m
+[32m+[m[32m_external_preflight_lock = threading.Lock()[m
+[32m+[m[32m_external_preflight_em_execucao = False[m
+[32m+[m[32m_external_preflight_aprovados = set()[m
+[32m+[m[32m_external_preflight_proxima_tentativa = {}[m
+[32m+[m
+ [m
+ def _tentar_reservar_coletor(coletor_id: str) -> bool:[m
+     """Reserva atomicamente um coletor para impedir processamento concorrente."""[m
+[36m@@ -159,6 +178,173 @@[m [mdef safe_move(src: str, dst_dir: str) -> str:[m
+     return dst[m
+ [m
+ [m
+[32m+[m
+[32m+[m[32mdef _listar_documentos_candidatos_externos(settings):[m
+[32m+[m[32m    """[m
+[32m+[m[32m    Retorna documentos cujo estado FINAL no banco local atende ao gatilho:[m
+[32m+[m
+[32m+[m[32m    - LOGCONF.StatusConf = CONFERIDO[m
+[32m+[m[32m    - todos os registros PRODCONF do documento possuem Saldo = 0[m
+[32m+[m
+[32m+[m[32m    A origem dos dados não importa:[m
+[32m+[m[32m    Wi-Fi direto no SQL ou sincronização por TXT convergem para esta regra.[m
+[32m+[m[32m    """[m
+[32m+[m[32m    conn = get_connection(settings.sql)[m
+[32m+[m[32m    try:[m
+[32m+[m[32m        cur = conn.cursor()[m
+[32m+[m[32m        cur.execute([m
+[32m+[m[32m            """[m
+[32m+[m[32m            SELECT[m
+[32m+[m[32m                CAST(l.NumNF AS VARCHAR(50)) AS NumDoc,[m
+[32m+[m[32m                COUNT(p.NumDoc) AS TotalItens,[m
+[32m+[m[32m                SUM([m
+[32m+[m[32m                    CASE[m
+[32m+[m[32m                        WHEN ISNULL(p.Saldo, 0) = 0 THEN 0[m
+[32m+[m[32m                        ELSE 1[m
+[32m+[m[32m                    END[m
+[32m+[m[32m                ) AS ItensComSaldo[m
+[32m+[m[32m            FROM dbo.logConf l[m
+[32m+[m[32m            INNER JOIN dbo.prodConf p[m
+[32m+[m[32m                ON CAST(p.NumDoc AS VARCHAR(50))[m
+[32m+[m[32m                 = CAST(l.NumNF AS VARCHAR(50))[m
+[32m+[m[32m            WHERE UPPER(LTRIM(RTRIM(ISNULL(l.StatusConf, '')))) = 'CONFERIDO'[m
+[32m+[m[32m            GROUP BY CAST(l.NumNF AS VARCHAR(50))[m
+[32m+[m[32m            HAVING COUNT(p.NumDoc) > 0[m
+[32m+[m[32m               AND SUM([m
+[32m+[m[32m                    CASE[m
+[32m+[m[32m                        WHEN ISNULL(p.Saldo, 0) = 0 THEN 0[m
+[32m+[m[32m                        ELSE 1[m
+[32m+[m[32m                    END[m
+[32m+[m[32m               ) = 0[m
+[32m+[m[32m            ORDER BY CAST(l.NumNF AS VARCHAR(50))[m
+[32m+[m[32m            """[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        return [[m
+[32m+[m[32m            (str(row[0]).strip(), int(row[1] or 0))[m
+[32m+[m[32m            for row in cur.fetchall()[m
+[32m+[m[32m        ][m
+[32m+[m
+[32m+[m[32m    finally:[m
+[32m+[m[32m        try:[m
+[32m+[m[32m            conn.close()[m
+[32m+[m[32m        except Exception:[m
+[32m+[m[32m            pass[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef _executar_varredura_preflight_externo(settings):[m
+[32m+[m[32m    """[m
+[32m+[m[32m    ETAPA 7D - LANCAMENTO AUTOMATICO.[m
+[32m+[m
+[32m+[m[32m    Processa o lançamento externo dos documentos que já atingiram o estado final[m
+[32m+[m[32m    no banco local. Não depende da chegada de arquivos.[m
+[32m+[m
+[32m+[m[32m    Segurança:[m
+[32m+[m[32m    - não altera o fluxo LOGCONF/PRODCONF;[m
+[32m+[m[32m    - grava somente após todas as validações e usando transação;[m
+[32m+[m[32m    - qualquer erro externo é isolado;[m
+[32m+[m[32m    - evita poluir logs repetindo o mesmo resultado a cada ciclo.[m
+[32m+[m[32m    """[m
+[32m+[m[32m    global _external_preflight_em_execucao[m
+[32m+[m
+[32m+[m[32m    with _external_preflight_lock:[m
+[32m+[m[32m        if _external_preflight_em_execucao:[m
+[32m+[m[32m            return[m
+[32m+[m[32m        _external_preflight_em_execucao = True[m
+[32m+[m
+[32m+[m[32m    try:[m
+[32m+[m[32m        settings_atualizados = load_settings()[m
+[32m+[m
+[32m+[m[32m        try:[m
+[32m+[m[32m            candidatos = _listar_documentos_candidatos_externos([m
+[32m+[m[32m                settings_atualizados[m
+[32m+[m[32m            )[m
+[32m+[m[32m        except Exception as e:[m
+[32m+[m[32m            logging.exception([m
+[32m+[m[32m                f"[FONTE EXTERNA][VARREDURA][ERRO BANCO LOCAL] "[m
+[32m+[m[32m                f"Motivo={e}"[m
+[32m+[m[32m            )[m
+[32m+[m[32m            return[m
+[32m+[m
+[32m+[m[32m        if not candidatos:[m
+[32m+[m[32m            return[m
+[32m+[m
+[32m+[m[32m        try:[m
+[32m+[m[32m            from .external_stock_sync import automatic_external_posting[m
+[32m+[m[32m        except Exception as e:[m
+[32m+[m[32m            logging.exception([m
+[32m+[m[32m                f"[FONTE EXTERNA][VARREDURA][MODULO INDISPONIVEL] "[m
+[32m+[m[32m                f"Motivo={e} | Processamento local preservado."[m
+[32m+[m[32m            )[m
+[32m+[m[32m            return[m
+[32m+[m
+[32m+[m[32m        for num_doc, total_itens in candidatos:[m
+[32m+[m[32m            # Documento já aprovado nesta execução do Importer:[m
+[32m+[m[32m            # não chama novamente o preflight e não polui os logs.[m
+[32m+[m[32m            # Após reinício do Importer ele será validado uma vez novamente;[m
+[32m+[m[32m            # na etapa de gravação real a proteção anti-duplicidade do banco[m
+[32m+[m[32m            # continuará sendo a autoridade final.[m
+[32m+[m[32m            if num_doc in _external_preflight_aprovados:[m
+[32m+[m[32m                continue[m
+[32m+[m
+[32m+[m[32m            agora = time.monotonic()[m
+[32m+[m[32m            proxima_tentativa = _external_preflight_proxima_tentativa.get([m
+[32m+[m[32m                num_doc,[m
+[32m+[m[32m                0,[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            if agora < proxima_tentativa:[m
+[32m+[m[32m                continue[m
+[32m+[m
+[32m+[m[32m            try:[m
+[32m+[m[32m                resultado = automatic_external_posting(num_doc)[m
+[32m+[m
+[32m+[m[32m                logging.info([m
+[32m+[m[32m                    f"[FONTE EXTERNA][VARREDURA AUTOMATICA] "[m
+[32m+[m[32m                    f"Documento={num_doc} | "[m
+[32m+[m[32m                    f"Status={resultado.status} | "[m
+[32m+[m[32m                    f"Itens={resultado.items} | "[m
+[32m+[m[32m                    f"Mensagem={resultado.message}"[m
+[32m+[m[32m                )[m
+[32m+[m
+[32m+[m[32m                if resultado.status in ("POSTED", "ALREADY_POSTED"):[m
+[32m+[m[32m                    _external_preflight_aprovados.add(num_doc)[m
+[32m+[m[32m                    _external_preflight_proxima_tentativa.pop([m
+[32m+[m[32m                        num_doc,[m
+[32m+[m[32m                        None,[m
+[32m+[m[32m                    )[m
+[32m+[m
+[32m+[m[32m                elif resultado.status == "SIMULATION_ERROR":[m
+[32m+[m[32m                    # Erro de negócio: saldo insuficiente,[m
+[32m+[m[32m                    # produto/localização inexistente etc.[m
+[32m+[m[32m                    # Não consulta a fonte externa a cada 10 segundos,[m
+[32m+[m[32m                    # mas mantém recuperação automática.[m
+[32m+[m[32m                    _external_preflight_proxima_tentativa[num_doc] = ([m
+[32m+[m[32m                        time.monotonic()[m
+[32m+[m[32m                        + _EXTERNAL_BUSINESS_RETRY_SEC[m
+[32m+[m[32m                    )[m
+[32m+[m
+[32m+[m[32m                else:[m
+[32m+[m[32m                    # Erros técnicos/temporários continuam no ciclo normal[m
+[32m+[m[32m                    # de 10 segundos: CONNECTION_ERROR, ROLLBACK, ERROR etc.[m
+[32m+[m[32m                    _external_preflight_proxima_tentativa.pop([m
+[32m+[m[32m                        num_doc,[m
+[32m+[m[32m                        None,[m
+[32m+[m[32m                    )[m
+[32m+[m
+[32m+[m[32m            except Exception as e:[m
+[32m+[m[32m                logging.exception([m
+[32m+[m[32m                    f"[FONTE EXTERNA][VARREDURA][ERRO ISOLADO] "[m
+[32m+[m[32m                    f"Documento={num_doc} | Motivo={e} | "[m
+[32m+[m[32m                    f"Processamento local preservado."[m
+[32m+[m[32m                )[m
+[32m+[m
+[32m+[m[32m    finally:[m
+[32m+[m[32m        with _external_preflight_lock:[m
+[32m+[m[32m            _external_preflight_em_execucao = False[m
+[32m+[m
+[32m+[m
+[32m+[m
+ def process_xml(file_path: str, settings):[m
+     doc = parse_nfe_xml([m
+         file_path,[m
+[36m@@ -1333,6 +1519,9 @@[m [mdef main():[m
+ [m
+     try:[m
+         proxima_tentativa_sql = time.monotonic() + _RETRY_SQL_INTERVAL_SEC[m
+[32m+[m[32m        proximo_preflight_externo = ([m
+[32m+[m[32m            time.monotonic() + _EXTERNAL_PREFLIGHT_INTERVAL_SEC[m
+[32m+[m[32m        )[m
+ [m
+         while True:[m
+             time.sleep(1)[m
+[36m@@ -1350,6 +1539,19 @@[m [mdef main():[m
+                 except Exception as e:[m
+                     logging.exception(f"[BANCO][ERRO NA VERIFICACAO PERIODICA] {e}")[m
+ [m
+[32m+[m[32m            if agora >= proximo_preflight_externo:[m
+[32m+[m[32m                proximo_preflight_externo = ([m
+[32m+[m[32m                    agora + _EXTERNAL_PREFLIGHT_INTERVAL_SEC[m
+[32m+[m[32m                )[m
+[32m+[m[32m                try:[m
+[32m+[m[32m                    _executar_varredura_preflight_externo([m
+[32m+[m[32m                        load_settings()[m
+[32m+[m[32m                    )[m
+[32m+[m[32m                except Exception as e:[m
+[32m+[m[32m                    logging.exception([m
+[32m+[m[32m                        f"[FONTE EXTERNA][VARREDURA][ERRO PERIODICO] {e}"[m
+[32m+[m[32m                    )[m
+[32m+[m
+     except KeyboardInterrupt:[m
+         observer.stop()[m
+ [m
