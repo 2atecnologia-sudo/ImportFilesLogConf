@@ -1197,7 +1197,7 @@ class ConfigUI(tk.Tk):
             lc = local_conn.cursor()
 
             limpas = []
-            for tabela in ("scanerroconf", "prodConf", "logConf"):
+            for tabela in ("LancamentoExternoStatus", "scanerroconf", "prodConf", "logConf"):
                 lc.execute("SELECT OBJECT_ID(?, 'U')", (f"dbo.{tabela}",))
                 if lc.fetchone()[0] is not None:
                     lc.execute(f"DELETE FROM dbo.[{tabela}]")

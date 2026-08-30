@@ -10,28 +10,11 @@ from decimal import Decimal, InvalidOperation
 import pyodbc
 
 
-VERSION_MARKER = "ETAPA_7F_STATUS_LANCA_012"
+VERSION_MARKER = "ETAPA_7F_STATUS_LANCA_013_DIAGNOSTICO_ERROS"
 TEST_DATABASE_ALLOWED = "est_ambTestes"
 MOVEMENT_TABLE = "movEstambTeste"
 MOVEMENT_TYPE = "SAIDA_CONFERENCIA"
 STATUS_TABLE = "LancamentoExternoStatus"
-
-
-def _allowed_test_database(config_path: str | None = None) -> str:
-    """
-    Banco permitido para gravação em MODO DEMO.
-    Mantém a trava de segurança, mas deixa o nome do banco portátil/configurável.
-    """
-    try:
-        cfg = _load_cfg(config_path)
-        value = cfg.get(
-            "test_environment",
-            "database",
-            fallback=TEST_DATABASE_ALLOWED,
-        ).strip()
-        return value or TEST_DATABASE_ALLOWED
-    except Exception:
-        return TEST_DATABASE_ALLOWED
 
 
 @dataclass
@@ -720,6 +703,64 @@ def _record_external_status(
         )
 
 
+
+def _get_document_coletor_id(
+    num_doc: str,
+    config_path: str | None = None,
+) -> str:
+    """
+    Recupera o ColetorID do documento apenas para enriquecer o diagnóstico
+    de erros exibido no Dashboard/Kalipso.
+
+    Não altera a lógica de lançamento e não grava nenhum dado.
+    """
+    num_doc = str(num_doc or "").strip()
+    if not num_doc:
+        return ""
+
+    conn = None
+    try:
+        conn = pyodbc.connect(
+            _build_local_conn_str(config_path),
+            timeout=5,
+        )
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            SELECT TOP 1 ColetorID
+            FROM
+            (
+                SELECT 1 AS Prioridade, ColetorID
+                FROM dbo.prodConf
+                WHERE CAST(NumDoc AS VARCHAR(50)) = ?
+                  AND NULLIF(LTRIM(RTRIM(ColetorID)), '') IS NOT NULL
+
+                UNION ALL
+
+                SELECT 2 AS Prioridade, ColetorID
+                FROM dbo.logConf
+                WHERE CAST(NumNF AS VARCHAR(50)) = ?
+                  AND NULLIF(LTRIM(RTRIM(ColetorID)), '') IS NOT NULL
+            ) AS X
+            ORDER BY Prioridade
+            """,
+            (num_doc, num_doc),
+        )
+        row = cur.fetchone()
+        return str(row[0] or "").strip() if row else ""
+
+    except Exception:
+        return ""
+
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def _first_simulation_problem(
     simulation: SimulationResult,
 ):
@@ -738,6 +779,8 @@ def _first_simulation_problem(
                 "local": item.localizacao or "",
                 "qtde": item.qtd_lida,
                 "saldo": item.saldo_atual,
+                "coletor": item.coletor_id or "",
+                "mensagem": item.message or "",
             }
 
     return {
@@ -746,6 +789,8 @@ def _first_simulation_problem(
         "local": "",
         "qtde": None,
         "saldo": None,
+        "coletor": "",
+        "mensagem": "",
     }
 
 
@@ -960,24 +1005,15 @@ def _read_local_items(
         cur.execute(
             """
             SELECT
-                pc.CodProd,
-                pc.GTIN,
-                pc.DescProd,
-                pc.QtdeLido,
-                pc.Localizacao,
-                COALESCE(
-                    NULLIF(LTRIM(RTRIM(pc.ColetorID)), ''),
-                    (
-                        SELECT TOP 1 lc.ColetorID
-                        FROM dbo.logConf AS lc
-                        WHERE CAST(lc.NumNF AS VARCHAR(50)) =
-                              CAST(pc.NumDoc AS VARCHAR(50))
-                          AND NULLIF(LTRIM(RTRIM(lc.ColetorID)), '') IS NOT NULL
-                    )
-                ) AS ColetorID
-            FROM dbo.prodConf AS pc
-            WHERE CAST(pc.NumDoc AS VARCHAR(50)) = ?
-            ORDER BY pc.CodProd, pc.GTIN, pc.Localizacao
+                CodProd,
+                GTIN,
+                DescProd,
+                QtdeLido,
+                Localizacao,
+                ColetorID
+            FROM dbo.prodConf
+            WHERE CAST(NumDoc AS VARCHAR(50)) = ?
+            ORDER BY CodProd, GTIN, Localizacao
             """,
             (str(num_doc),),
         )
@@ -1219,16 +1255,14 @@ def post_external_test_transaction(
     if not source.valid:
         return PostingResult("INVALID_CONFIG", num_doc, 0, source.error)
 
-    allowed_test_database = _allowed_test_database(config_path)
-
-    if source.database.lower() != allowed_test_database.lower():
+    if source.database.lower() != TEST_DATABASE_ALLOWED.lower():
         return PostingResult(
             "BLOCKED_DATABASE",
             num_doc,
             0,
             (
-                f"GRAVAÇÃO BLOQUEADA: o modo DEMO só permite o banco "
-                f"{allowed_test_database}. Banco configurado={source.database}."
+                f"GRAVAÇÃO BLOQUEADA: esta função de teste só permite o banco "
+                f"{TEST_DATABASE_ALLOWED}. Banco configurado={source.database}."
             ),
         )
 
@@ -1662,7 +1696,7 @@ def automatic_external_posting(
     5) qualquer falha preserva o banco via rollback.
 
     A própria post_external_test_transaction() bloqueia qualquer banco
-    diferente do banco configurado em [test_environment].
+    diferente de est_ambTestes.
     """
     num_doc = str(num_doc).strip()
 
@@ -1700,22 +1734,36 @@ def automatic_external_posting(
             "local": "",
             "qtde": None,
             "saldo": None,
+            "coletor": "",
+            "mensagem": "",
         }
 
         if preflight.status == "SIMULATION_ERROR":
             simulation = simulate_external_posting(num_doc, config_path)
             problem = _first_simulation_problem(simulation)
 
+        # Apenas enriquece o registro de ERRO com dados úteis ao usuário.
+        # Não interfere na decisão de bloquear, reprocessar ou lançar.
+        coletor_erro = (
+            str(problem.get("coletor") or "").strip()
+            or _get_document_coletor_id(num_doc, config_path)
+        )
+        mensagem_erro = (
+            str(problem.get("mensagem") or "").strip()
+            or str(preflight.message or "").strip()
+        )
+
         _record_external_status(
             num_doc=num_doc,
             status="NAO_LANCADO",
             motivo=problem["motivo"],
-            mensagem=preflight.message,
+            mensagem=mensagem_erro,
             item_problema=problem["item"],
             localizacao=problem["local"],
             qtde_solicitada=problem["qtde"],
             saldo_disponivel=problem["saldo"],
             itens=preflight.items,
+            coletor_id=coletor_erro,
             fonte_externa=source.name if source.configured else "",
             banco_externo=source.database if source.configured else "",
             config_path=config_path,
@@ -1821,6 +1869,7 @@ def automatic_external_posting(
         motivo=posting.status,
         mensagem=message,
         itens=posting.items,
+        coletor_id=_get_document_coletor_id(num_doc, config_path),
         fonte_externa=source.name if source.configured else "",
         banco_externo=source.database if source.configured else "",
         config_path=config_path,
