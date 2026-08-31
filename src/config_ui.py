@@ -6,11 +6,14 @@ import subprocess
 import sys
 import uuid
 import threading
+import time
+import xml.etree.ElementTree as ET
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 
 import pyodbc
 from PIL import Image, ImageTk
+from decimal import Decimal, InvalidOperation
 
 from .runtime_status import read_runtime_status
 import re
@@ -125,10 +128,19 @@ class ConfigUI(tk.Tk):
         self.vars = {}
         self.widgets = {}
 
+        # Monitor opcional da pasta de NF-e de entrada (somente Ambiente de Testes).
+        self._nfe_watch_thread = None
+        self._nfe_watch_stop = threading.Event()
+        self._nfe_watch_enabled = False
+
         self._build()
         self._load_to_form()
         self._apply_states()
         self._select_initial_tab()
+
+        # Restaura automaticamente o monitor de NF-e caso ele tenha sido
+        # deixado em PLAY na última execução.
+        self.after(700, self._restore_nfe_watch_from_ini)
 
         # Qualquer forma de fechar a janela salva todas as configurações.
         self.protocol("WM_DELETE_WINDOW", self._save_and_close)
@@ -142,10 +154,15 @@ class ConfigUI(tk.Tk):
         self.nb.bind("<<NotebookTabChanged>>", self._on_main_tab_changed)
 
         tab_sql = ttk.Frame(self.nb)
+        self.tab_sql = tab_sql
         tab_paths = ttk.Frame(self.nb)
+        self.tab_paths = tab_paths
         tab_input = ttk.Frame(self.nb)
+        self.tab_input = tab_input
         tab_app = ttk.Frame(self.nb)
+        self.tab_app = tab_app
         tab_output = ttk.Frame(self.nb)
+        self.tab_output = tab_output
         tab_connector = ttk.Frame(self.nb)
         self.tab_connector = tab_connector
         self.tab_test_environment = ttk.Frame(self.nb)
@@ -159,6 +176,9 @@ class ConfigUI(tk.Tk):
         self.nb.add(tab_connector, text="Fonte de Dados Externa")
         self.nb.add(self.tab_test_environment, text="Ambiente de Testes")
         self.nb.add(self.tab_status, text="Status / Logs")
+
+        self.tab_help = ttk.Frame(self.nb)
+        self.nb.add(self.tab_help, text="Ajuda")
 
         self.tab_about = ttk.Frame(self.nb)
         self.nb.add(self.tab_about, text="Sobre")
@@ -507,8 +527,14 @@ class ConfigUI(tk.Tk):
         # ---- Status / Logs
         self._build_status_tab()
 
+        # ---- Ajuda
+        self._build_help_tab()
+
         # ---- Sobre
         self._build_about_tab()
+
+        # ---- Ajuda contextual em cada aba
+        self._add_context_help_buttons()
 
         # ---- Bottom
         bottom = ttk.Frame(self)
@@ -516,6 +542,7 @@ class ConfigUI(tk.Tk):
 
         ttk.Button(bottom, text="Salvar", command=self._save).pack(side="right")
         ttk.Button(bottom, text="Fechar", command=self._save_and_close).pack(side="right", padx=(0, 8))
+        ttk.Button(bottom, text="? Ajuda", command=self._open_context_help).pack(side="left")
 
 
     def _build_test_environment_tab(self):
@@ -526,19 +553,20 @@ class ConfigUI(tk.Tk):
         ttk.Label(
             container,
             text=(
-                "Ambiente exclusivo para testes e demonstrações. "
+                "Ambiente exclusivo para testes. "
                 "As configurações de rede, SQL, pastas e conexões são preservadas."
             ),
         ).pack(anchor="w", pady=(0, 8))
 
-        reset_box = ttk.LabelFrame(container, text="Ambiente limpo para nova demonstração")
+        reset_box = ttk.LabelFrame(container, text="Preparação do Ambiente de Testes")
         reset_box.pack(fill="x", pady=(0, 8))
 
         ttk.Label(
             reset_box,
             text=(
-                "Salvar Padrão guarda uma cópia do estoque fictício atual. "
-                "Resetar Ambiente apaga somente os DADOS de teste e restaura esse estoque padrão."
+                "Prepare o ambiente para novos testes. Você pode resetar os dados "
+                "ou carregar novamente o banco de exemplo, sem alterar as configurações, "
+                "conexões e pastas da aplicação."
             ),
             wraplength=600,
             justify="left",
@@ -601,6 +629,99 @@ class ConfigUI(tk.Tk):
             pady=(0, 8),
         )
 
+        # Entrada de estoque por NF-e XML (camada isolada do fluxo de saída existente).
+        xml_entry_box = ttk.LabelFrame(container, text="Entradas de Estoque por NF-e XML")
+        xml_entry_box.pack(fill="x", pady=(0, 8))
+
+        ttk.Label(
+            xml_entry_box,
+            text=(
+                "Importa uma ou várias NF-e autorizadas e soma as quantidades ao estoque de teste. "
+                "A identificação do produto aceita CodProd OU GTIN."
+            ),
+            wraplength=760,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=4, sticky="w", padx=8, pady=(8, 4))
+
+        self.test_xml_status = tk.StringVar(value="Nenhum XML importado nesta sessão.")
+        ttk.Button(
+            xml_entry_box,
+            text="Importar 1 ou vários XMLs...",
+            command=self._import_nfe_xml_entries,
+        ).grid(row=1, column=0, sticky="w", padx=8, pady=8)
+
+        ttk.Label(
+            xml_entry_box,
+            textvariable=self.test_xml_status,
+        ).grid(row=1, column=1, columnspan=3, sticky="w", padx=8, pady=8)
+
+        # Pasta monitorada para NF-e de entrada.
+        watch_box = ttk.LabelFrame(container, text="Pasta de NF-e de Entrada")
+        watch_box.pack(fill="x", pady=(0, 8))
+
+        self.test_nfe_watch_dir = tk.StringVar(
+            value=self.cfg.get("test_environment", "nfe_input_dir", fallback="").strip()
+        )
+        self.test_nfe_watch_auto = tk.BooleanVar(
+            value=as_bool(
+                self.cfg.get(
+                    "test_environment",
+                    "nfe_auto_import",
+                    fallback="no",
+                )
+            )
+        )
+        self.test_nfe_watch_status = tk.StringVar(value="⏹ Monitoramento parado.")
+
+        ttk.Label(watch_box, text="Pasta").grid(
+            row=0, column=0, sticky="w", padx=8, pady=8
+        )
+
+        ttk.Entry(
+            watch_box,
+            textvariable=self.test_nfe_watch_dir,
+            width=48,
+            state="readonly",
+        ).grid(row=0, column=1, sticky="w", padx=8, pady=8)
+
+        ttk.Button(
+            watch_box,
+            text="Escolher pasta...",
+            command=self._pick_nfe_watch_folder,
+        ).grid(row=0, column=2, sticky="w", padx=8, pady=8)
+
+        ttk.Button(
+            watch_box,
+            text="Processar agora",
+            command=self._process_nfe_watch_folder_now,
+        ).grid(row=0, column=3, sticky="w", padx=8, pady=8)
+
+        self.btn_nfe_watch_start = ttk.Button(
+            watch_box,
+            text="▶ Iniciar",
+            command=self._start_nfe_watch,
+        )
+        self.btn_nfe_watch_start.grid(
+            row=1, column=0, sticky="w", padx=(8, 4), pady=(0, 8)
+        )
+
+        self.btn_nfe_watch_stop = ttk.Button(
+            watch_box,
+            text="■ Parar",
+            command=self._stop_nfe_watch,
+            state="disabled",
+        )
+        self.btn_nfe_watch_stop.grid(
+            row=1, column=1, sticky="w", padx=(4, 8), pady=(0, 8)
+        )
+
+        ttk.Label(
+            watch_box,
+            textvariable=self.test_nfe_watch_status,
+        ).grid(row=1, column=2, columnspan=2, sticky="w", padx=8, pady=(0, 8))
+
+        watch_box.grid_columnconfigure(1, weight=1)
+
         self.test_env_nb = ttk.Notebook(container)
         self.test_env_nb.pack(fill="both", expand=True)
 
@@ -608,6 +729,15 @@ class ConfigUI(tk.Tk):
         tab_moves = ttk.Frame(self.test_env_nb)
         self.test_env_nb.add(tab_stock, text="Estoque Atual")
         self.test_env_nb.add(tab_moves, text="Movimentações")
+
+        stock_manual_actions = ttk.Frame(tab_stock)
+        stock_manual_actions.pack(fill="x", padx=6, pady=(6, 0))
+
+        ttk.Button(
+            stock_manual_actions,
+            text="Editar Saldo Manualmente...",
+            command=self._edit_test_stock_balance,
+        ).pack(side="left")
 
         self._build_readonly_grid(
             tab_stock, "test_stock_tree", "test_stock_status",
@@ -965,12 +1095,15 @@ class ConfigUI(tk.Tk):
 
             # Registra a origem de cada posição de estoque como CARGA INICIAL.
             # Isso cria um extrato auditável sem alterar o saldo importado.
+            self._ensure_test_movement_description_column(cur)
+
             sql_mov = """
                 INSERT INTO dbo.movEstambTeste
                     (
                         NUM_DOCUMENTO,
                         COD_ITEM,
                         COD_BARRAS,
+                        DESCRICAO_ITEM,
                         QTD_MOVIMENTADA,
                         SALDO_ANTERIOR,
                         SALDO_POSTERIOR,
@@ -979,7 +1112,7 @@ class ConfigUI(tk.Tk):
                         RESULTADO,
                         DETALHE
                     )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
 
             movimentos = [
@@ -987,6 +1120,7 @@ class ConfigUI(tk.Tk):
                     "CARGA_INICIAL",
                     codprod,
                     gtin,
+                    desc,
                     saldo,
                     0,
                     saldo,
@@ -1187,6 +1321,12 @@ class ConfigUI(tk.Tk):
                     DELETE FROM dbo.movEstambTeste
                 """
             )
+            ec.execute(
+                """
+                IF OBJECT_ID('dbo.EntradaNFeProcessada', 'U') IS NOT NULL
+                    DELETE FROM dbo.EntradaNFeProcessada
+                """
+            )
 
             self.cfg = load_cfg()
             local_conn = pyodbc.connect(
@@ -1231,6 +1371,15 @@ class ConfigUI(tk.Tk):
                 "Configurações e conexões foram preservadas.",
                 parent=self,
             )
+
+            # A limpeza dos logs é opcional e independente do reset.
+            if messagebox.askyesno(
+                "Apagar Logs?",
+                "O Ambiente de Testes foi resetado com sucesso.\n\n"
+                "Deseja apagar também o Log do Usuário e o Log Técnico?",
+                parent=self,
+            ):
+                self._clear_logs_after_test_reset()
 
         except Exception as e:
             if estoque_conn is not None:
@@ -1348,6 +1497,1186 @@ class ConfigUI(tk.Tk):
                 except Exception:
                     pass
 
+
+    def _ensure_nfe_entry_control_table(self, cur):
+        """Cria somente a tabela de controle de NF-e já processada, se ainda não existir."""
+        cur.execute(
+            """
+            IF OBJECT_ID('dbo.EntradaNFeProcessada', 'U') IS NULL
+            BEGIN
+                CREATE TABLE dbo.EntradaNFeProcessada
+                (
+                    ChaveNFe       VARCHAR(44)   NOT NULL PRIMARY KEY,
+                    NumNF          VARCHAR(50)   NULL,
+                    Emitente       VARCHAR(300)  NULL,
+                    DataEmissao    DATETIME2(0)  NULL,
+                    Arquivo        VARCHAR(500)  NULL,
+                    ItensLancados  INT           NOT NULL DEFAULT (0),
+                    ProcessadoEm   DATETIME2(0)  NOT NULL DEFAULT (SYSDATETIME())
+                );
+            END
+            """
+        )
+
+    def _read_nfe_xml_for_stock_entry(self, file_path):
+        """Lê NF-e 4.00 autorizada e devolve cabeçalho + itens para entrada de estoque."""
+        ns = {"nfe": "http://www.portalfiscal.inf.br/nfe"}
+        try:
+            tree = ET.parse(file_path)
+            root = tree.getroot()
+        except Exception as e:
+            raise RuntimeError(f"XML inválido: {e}") from e
+
+        inf_nfe = root.find(".//nfe:infNFe", ns)
+        if inf_nfe is None:
+            raise RuntimeError("Estrutura infNFe não encontrada.")
+
+        chave = str(inf_nfe.attrib.get("Id", "")).strip()
+        if chave.startswith("NFe"):
+            chave = chave[3:]
+
+        if len(chave) != 44 or not chave.isdigit():
+            ch_tag = root.find(".//nfe:protNFe/nfe:infProt/nfe:chNFe", ns)
+            chave = str(ch_tag.text or "").strip() if ch_tag is not None else ""
+
+        if len(chave) != 44 or not chave.isdigit():
+            raise RuntimeError("Chave de acesso da NF-e não encontrada ou inválida.")
+
+        cstat = root.find(".//nfe:protNFe/nfe:infProt/nfe:cStat", ns)
+        cstat_value = str(cstat.text or "").strip() if cstat is not None else ""
+        if cstat_value != "100":
+            raise RuntimeError(
+                f"NF-e não autorizada para uso. cStat={cstat_value or 'não informado'}."
+            )
+
+        n_nf = root.find(".//nfe:ide/nfe:nNF", ns)
+        dh_emi = root.find(".//nfe:ide/nfe:dhEmi", ns)
+        emit = root.find(".//nfe:emit/nfe:xNome", ns)
+
+        num_nf = str(n_nf.text or "").strip() if n_nf is not None else ""
+        data_emissao = str(dh_emi.text or "").strip() if dh_emi is not None else ""
+        emitente = str(emit.text or "").strip() if emit is not None else ""
+
+        items = []
+        for det in inf_nfe.findall("nfe:det", ns):
+            prod = det.find("nfe:prod", ns)
+            if prod is None:
+                continue
+
+            def _txt(tag):
+                node = prod.find(f"nfe:{tag}", ns)
+                return str(node.text or "").strip() if node is not None else ""
+
+            codprod = _txt("cProd")
+            gtin_trib = _txt("cEANTrib")
+            gtin_com = _txt("cEAN")
+            gtin = gtin_trib if gtin_trib and gtin_trib.upper() != "SEM GTIN" else gtin_com
+            if gtin and gtin.upper() == "SEM GTIN":
+                gtin = ""
+
+            desc = _txt("xProd")
+            qtd_txt = _txt("qTrib") or _txt("qCom")
+            try:
+                qtd = Decimal(str(qtd_txt).replace(",", "."))
+            except Exception:
+                raise RuntimeError(
+                    f"Quantidade inválida no item {det.attrib.get('nItem', '?')}: {qtd_txt!r}"
+                )
+
+            if qtd <= 0:
+                raise RuntimeError(
+                    f"Quantidade não positiva no item {det.attrib.get('nItem', '?')}."
+                )
+
+            if not codprod and not gtin:
+                raise RuntimeError(
+                    f"Item {det.attrib.get('nItem', '?')} sem cProd e sem GTIN."
+                )
+
+            items.append(
+                {
+                    "item": str(det.attrib.get("nItem", "")).strip(),
+                    "codprod": codprod,
+                    "gtin": gtin,
+                    "desc": desc,
+                    "qtd": qtd,
+                }
+            )
+
+        if not items:
+            raise RuntimeError("NF-e sem itens de produto.")
+
+        return {
+            "chave": chave,
+            "num_nf": num_nf,
+            "emitente": emitente,
+            "data_emissao": data_emissao,
+            "items": items,
+            "arquivo": os.path.basename(file_path),
+        }
+
+    def _find_stock_row_for_nfe_item(self, cur, codprod, gtin):
+        """
+        Localiza por CodProd OU GTIN.
+        Se ambos encontrarem a mesma posição, usa normalmente.
+        Se só um encontrar, usa normalmente.
+        Se encontrarem posições diferentes, bloqueia por ambiguidade.
+        """
+        matches = []
+
+        if codprod:
+            cur.execute(
+                """
+                SELECT COD_ITEM, COD_BARRAS, DESCRICAO_ITEM, LOCAL_ESTOQUE, SALDO_ATUAL
+                FROM dbo.ESTOQUE
+                WHERE LTRIM(RTRIM(COD_ITEM)) = ?
+                """,
+                (codprod,),
+            )
+            matches.extend(cur.fetchall())
+
+        if gtin:
+            cur.execute(
+                """
+                SELECT COD_ITEM, COD_BARRAS, DESCRICAO_ITEM, LOCAL_ESTOQUE, SALDO_ATUAL
+                FROM dbo.ESTOQUE
+                WHERE LTRIM(RTRIM(COD_BARRAS)) = ?
+                """,
+                (gtin,),
+            )
+            matches.extend(cur.fetchall())
+
+        unique = {}
+        for row in matches:
+            key = (
+                str(row[0] or "").strip(),
+                str(row[1] or "").strip(),
+                str(row[3] or "").strip(),
+            )
+            unique[key] = row
+
+        rows = list(unique.values())
+
+        if not rows:
+            return None
+
+        if len(rows) > 1:
+            raise RuntimeError(
+                "CodProd/GTIN localizaram mais de uma posição de estoque. "
+                "A entrada foi bloqueada para evitar lançamento incorreto."
+            )
+
+        return rows[0]
+
+    def _process_single_nfe_stock_entry(self, cur, nfe):
+        """Processa uma única NF-e dentro da transação já aberta."""
+        self._ensure_nfe_entry_control_table(cur)
+
+        cur.execute(
+            "SELECT COUNT(*) FROM dbo.EntradaNFeProcessada WHERE ChaveNFe = ?",
+            (nfe["chave"],),
+        )
+        if int(cur.fetchone()[0]) > 0:
+            return {
+                "status": "DUPLICADA",
+                "num_nf": nfe["num_nf"],
+                "arquivo": nfe["arquivo"],
+                "itens": 0,
+                "detalhe": (
+                    f"NF-e {nfe['num_nf'] or '-'} já importada anteriormente. "
+                    "Nenhuma nova entrada de estoque foi realizada."
+                ),
+            }
+
+        prepared = []
+        for item in nfe["items"]:
+            row = self._find_stock_row_for_nfe_item(
+                cur,
+                item["codprod"],
+                item["gtin"],
+            )
+
+            if row is None:
+                # Produto novo no ERP de simulação:
+                # cadastra automaticamente usando os dados disponíveis na NF-e.
+                cod_item = str(item["codprod"] or "").strip()
+                cod_barras = str(item["gtin"] or "").strip()
+                descricao = str(item["desc"] or "").strip()
+                local = "SEM_LOCAL"
+                saldo_anterior = Decimal("0")
+                saldo_posterior = item["qtd"]
+                novo_produto = True
+            else:
+                cod_item = str(row[0] or "").strip()
+                cod_barras = str(row[1] or "").strip()
+                descricao = str(row[2] or item["desc"] or "").strip()
+                local = str(row[3] or "").strip()
+                saldo_anterior = Decimal(str(row[4] or 0))
+                saldo_posterior = saldo_anterior + item["qtd"]
+                novo_produto = False
+
+            prepared.append(
+                (
+                    item,
+                    cod_item,
+                    cod_barras,
+                    descricao,
+                    local,
+                    saldo_anterior,
+                    saldo_posterior,
+                    novo_produto,
+                )
+            )
+
+        # Só grava depois que TODOS os itens foram validados.
+        for (
+            item,
+            cod_item,
+            cod_barras,
+            descricao,
+            local,
+            saldo_anterior,
+            saldo_posterior,
+            novo_produto,
+        ) in prepared:
+            if novo_produto:
+                cur.execute(
+                    """
+                    INSERT INTO dbo.ESTOQUE
+                        (COD_ITEM, COD_BARRAS, DESCRICAO_ITEM, LOCAL_ESTOQUE, SALDO_ATUAL)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        cod_item or None,
+                        cod_barras or None,
+                        descricao,
+                        local,
+                        saldo_posterior,
+                    ),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE dbo.ESTOQUE
+                    SET SALDO_ATUAL = ?
+                    WHERE LTRIM(RTRIM(COD_ITEM)) = ?
+                      AND LTRIM(RTRIM(COD_BARRAS)) = ?
+                      AND LTRIM(RTRIM(LOCAL_ESTOQUE)) = ?
+                    """,
+                    (
+                        saldo_posterior,
+                        cod_item,
+                        cod_barras,
+                        local,
+                    ),
+                )
+
+            self._ensure_test_movement_description_column(cur)
+
+            cur.execute(
+                """
+                INSERT INTO dbo.movEstambTeste
+                (
+                    NUM_DOCUMENTO,
+                    COD_ITEM,
+                    COD_BARRAS,
+                    DESCRICAO_ITEM,
+                    QTD_MOVIMENTADA,
+                    SALDO_ANTERIOR,
+                    SALDO_POSTERIOR,
+                    IDENT_TERMINAL,
+                    TIPO_OPERACAO,
+                    RESULTADO,
+                    DETALHE
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    nfe["num_nf"] or nfe["chave"],
+                    cod_item or item["codprod"],
+                    cod_barras or item["gtin"],
+                    descricao,
+                    item["qtd"],
+                    saldo_anterior,
+                    saldo_posterior,
+                    None,
+                    "ENTRADA_NFE",
+                    "SUCESSO",
+                    (
+                        f"Entrada por NF-e | Emitente: {nfe['emitente']} | "
+                        f"XML cProd={item['codprod'] or '-'} | "
+                        f"XML GTIN={item['gtin'] or '-'} | "
+                        f"{descricao} | Local: {local} | "
+                        f"{'Produto cadastrado automaticamente' if novo_produto else 'Produto existente atualizado'}"
+                    ),
+                ),
+            )
+
+        cur.execute(
+            """
+            INSERT INTO dbo.EntradaNFeProcessada
+                (ChaveNFe, NumNF, Emitente, DataEmissao, Arquivo, ItensLancados)
+            VALUES (?, ?, ?, TRY_CONVERT(DATETIME2(0), ?), ?, ?)
+            """,
+            (
+                nfe["chave"],
+                nfe["num_nf"],
+                nfe["emitente"],
+                nfe["data_emissao"],
+                nfe["arquivo"],
+                len(prepared),
+            ),
+        )
+
+        return {
+            "status": "OK",
+            "num_nf": nfe["num_nf"],
+            "arquivo": nfe["arquivo"],
+            "itens": len(prepared),
+            "detalhe": f"{len(prepared)} item(ns) lançados.",
+        }
+
+    def _import_nfe_xml_entries(self):
+        """Seleciona 1 ou vários XMLs e lança entradas no estoque de testes."""
+        files = filedialog.askopenfilenames(
+            parent=self,
+            title="Selecionar NF-e XML para entrada de estoque",
+            filetypes=[
+                ("Arquivos XML", "*.xml"),
+                ("Todos os arquivos", "*.*"),
+            ],
+        )
+
+        if not files:
+            return
+
+        conn = None
+        results = []
+        try:
+            conn = pyodbc.connect(
+                self._build_test_environment_write_conn_str(),
+                timeout=5,
+                autocommit=False,
+            )
+            cur = conn.cursor()
+
+            for file_path in files:
+                try:
+                    nfe = self._read_nfe_xml_for_stock_entry(file_path)
+                    result = self._process_single_nfe_stock_entry(cur, nfe)
+                    if result["status"] == "OK":
+                        conn.commit()
+                    else:
+                        conn.rollback()
+                    results.append(result)
+                except Exception as e:
+                    conn.rollback()
+                    results.append(
+                        {
+                            "status": "ERRO",
+                            "num_nf": "",
+                            "arquivo": os.path.basename(file_path),
+                            "itens": 0,
+                            "detalhe": str(e),
+                        }
+                    )
+
+            ok = sum(1 for r in results if r["status"] == "OK")
+            dup = sum(1 for r in results if r["status"] == "DUPLICADA")
+            err = sum(1 for r in results if r["status"] == "ERRO")
+            itens = sum(int(r.get("itens") or 0) for r in results if r["status"] == "OK")
+
+            self.test_xml_status.set(
+                f"XMLs processados: {len(results)} | OK: {ok} | Duplicados: {dup} | "
+                f"Erros: {err} | Itens lançados: {itens}"
+            )
+
+            detalhes = []
+            for r in results:
+                detalhes.append(
+                    f"{r['status']} | NF={r.get('num_nf') or '-'} | "
+                    f"{r['arquivo']} | {r['detalhe']}"
+                )
+
+            if dup > 0 and ok == 0 and err == 0:
+                log_level = "ATENÇÃO"
+                log_reason = (
+                    f"{dup} NF-e já importada anteriormente. "
+                    "Nenhuma nova entrada de estoque foi realizada."
+                )
+                log_action = (
+                    "Nenhuma ação necessária. A proteção contra duplicidade impediu "
+                    "um novo lançamento da mesma NF-e."
+                )
+            else:
+                log_level = "OK" if err == 0 else "ATENÇÃO"
+                log_reason = (
+                    f"{ok} XML(s) lançado(s), {dup} NF-e já importada(s) ignorada(s), "
+                    f"{err} com erro."
+                )
+                log_action = "Consulte os detalhes abaixo quando houver erro."
+
+            self._write_test_user_log(
+                log_level,
+                "IMPORTAÇÃO DE NF-e DE ENTRADA",
+                log_reason,
+                log_action,
+                detalhes,
+            )
+
+            self._refresh_test_stock()
+            self._refresh_test_moves()
+
+            messagebox.showinfo(
+                "Entrada de Estoque por NF-e",
+                (
+                    f"Arquivos selecionados: {len(results)}\n"
+                    f"Importados: {ok}\n"
+                    f"NF-e já importadas (ignoradas): {dup}\n"
+                    f"Com erro: {err}\n"
+                    f"Itens lançados: {itens}\n\n"
+                    "Cada NF-e é transacionada separadamente: se um item da nota falhar, "
+                    "nenhum item daquela NF-e é confirmado."
+                ),
+                parent=self,
+            )
+
+        except Exception as e:
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            self.test_xml_status.set("Falha ao iniciar importação de NF-e.")
+            messagebox.showerror(
+                "Entrada de Estoque por NF-e",
+                f"Não foi possível processar os XMLs.\n\nDetalhe: {e}",
+                parent=self,
+            )
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+
+    def _edit_test_stock_balance(self):
+        """
+        Ajuste manual SOMENTE do saldo de uma posição do estoque de testes.
+
+        Não interfere no looper nem na lógica de saída.
+        Registra o ajuste em dbo.movEstambTeste para manter auditoria.
+        """
+        tree = getattr(self, "test_stock_tree", None)
+        if tree is None:
+            return
+
+        selected = tree.selection()
+        if not selected:
+            messagebox.showwarning(
+                "Editar Saldo",
+                "Selecione primeiro um produto na grade Estoque Atual.",
+                parent=self,
+            )
+            return
+
+        values = tree.item(selected[0], "values")
+        if not values or len(values) < 5:
+            messagebox.showerror(
+                "Editar Saldo",
+                "Não foi possível identificar os dados do produto selecionado.",
+                parent=self,
+            )
+            return
+
+        codprod = str(values[0] or "").strip()
+        gtin = str(values[1] or "").strip()
+        descricao = str(values[2] or "").strip()
+        local = str(values[3] or "").strip()
+        saldo_atual_txt = str(values[4] or "0").strip()
+
+        try:
+            saldo_atual = Decimal(saldo_atual_txt.replace(",", "."))
+        except Exception:
+            messagebox.showerror(
+                "Editar Saldo",
+                f"Saldo atual inválido: {saldo_atual_txt}",
+                parent=self,
+            )
+            return
+
+        novo_txt = simpledialog.askstring(
+            "Editar Saldo",
+            (
+                f"Produto: {codprod or '-'}\n"
+                f"GTIN: {gtin or '-'}\n"
+                f"Descrição: {descricao or '-'}\n"
+                f"Local: {local or '-'}\n"
+                f"Saldo atual: {saldo_atual}\n\n"
+                "Informe o NOVO saldo:"
+            ),
+            parent=self,
+            initialvalue=str(saldo_atual),
+        )
+
+        if novo_txt is None:
+            return
+
+        try:
+            novo_saldo = Decimal(str(novo_txt).strip().replace(",", "."))
+        except Exception:
+            messagebox.showerror(
+                "Editar Saldo",
+                "Informe um valor numérico válido.",
+                parent=self,
+            )
+            return
+
+        if novo_saldo < 0:
+            messagebox.showerror(
+                "Editar Saldo",
+                "O saldo não pode ser negativo.",
+                parent=self,
+            )
+            return
+
+        if novo_saldo == saldo_atual:
+            messagebox.showinfo(
+                "Editar Saldo",
+                "O novo saldo é igual ao saldo atual. Nenhuma alteração foi realizada.",
+                parent=self,
+            )
+            return
+
+        if not messagebox.askyesno(
+            "Confirmar Ajuste de Saldo",
+            (
+                f"Produto: {codprod or '-'}\n"
+                f"GTIN: {gtin or '-'}\n"
+                f"Local: {local or '-'}\n\n"
+                f"Saldo atual: {saldo_atual}\n"
+                f"Novo saldo: {novo_saldo}\n\n"
+                "Confirmar o ajuste manual?"
+            ),
+            parent=self,
+        ):
+            return
+
+        conn = None
+        try:
+            conn = pyodbc.connect(
+                self._build_test_environment_write_conn_str(),
+                timeout=5,
+                autocommit=False,
+            )
+            cur = conn.cursor()
+
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM dbo.ESTOQUE
+                WHERE LTRIM(RTRIM(ISNULL(COD_ITEM, ''))) = ?
+                  AND LTRIM(RTRIM(ISNULL(COD_BARRAS, ''))) = ?
+                  AND LTRIM(RTRIM(ISNULL(LOCAL_ESTOQUE, ''))) = ?
+                """,
+                (codprod, gtin, local),
+            )
+            total = int(cur.fetchone()[0])
+
+            if total != 1:
+                raise RuntimeError(
+                    f"Esperada exatamente 1 posição de estoque para o item selecionado; encontrado(s): {total}."
+                )
+
+            cur.execute(
+                """
+                UPDATE dbo.ESTOQUE
+                SET SALDO_ATUAL = ?
+                WHERE LTRIM(RTRIM(ISNULL(COD_ITEM, ''))) = ?
+                  AND LTRIM(RTRIM(ISNULL(COD_BARRAS, ''))) = ?
+                  AND LTRIM(RTRIM(ISNULL(LOCAL_ESTOQUE, ''))) = ?
+                """,
+                (novo_saldo, codprod, gtin, local),
+            )
+
+            diferenca = novo_saldo - saldo_atual
+
+            self._ensure_test_movement_description_column(cur)
+
+            cur.execute(
+                """
+                INSERT INTO dbo.movEstambTeste
+                (
+                    NUM_DOCUMENTO,
+                    COD_ITEM,
+                    COD_BARRAS,
+                    DESCRICAO_ITEM,
+                    QTD_MOVIMENTADA,
+                    SALDO_ANTERIOR,
+                    SALDO_POSTERIOR,
+                    IDENT_TERMINAL,
+                    TIPO_OPERACAO,
+                    RESULTADO,
+                    DETALHE
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "AJUSTE_MANUAL",
+                    codprod or None,
+                    gtin or None,
+                    descricao,
+                    diferenca,
+                    saldo_atual,
+                    novo_saldo,
+                    None,
+                    "AJUSTE_MANUAL",
+                    "SUCESSO",
+                    (
+                        f"Ajuste manual de saldo | {descricao} | Local: {local or '-'} | "
+                        f"Saldo anterior={saldo_atual} | Novo saldo={novo_saldo}"
+                    ),
+                ),
+            )
+
+            conn.commit()
+
+            self._write_test_user_log(
+                "OK",
+                "AJUSTE MANUAL DE SALDO",
+                (
+                    f"Saldo alterado de {saldo_atual} para {novo_saldo} "
+                    f"no produto {codprod or gtin or '-'}."
+                ),
+                "A movimentação foi registrada no histórico do Ambiente de Testes.",
+                [
+                    f"CodProd: {codprod or '-'}",
+                    f"GTIN: {gtin or '-'}",
+                    f"Local: {local or '-'}",
+                    f"Variação: {diferenca}",
+                ],
+            )
+
+            self._refresh_test_stock()
+            self._refresh_test_moves()
+
+            messagebox.showinfo(
+                "Editar Saldo",
+                (
+                    "Saldo atualizado com sucesso.\n\n"
+                    f"Saldo anterior: {saldo_atual}\n"
+                    f"Novo saldo: {novo_saldo}"
+                ),
+                parent=self,
+            )
+
+        except Exception as e:
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+
+            messagebox.showerror(
+                "Editar Saldo",
+                f"Nenhuma alteração foi confirmada.\n\nDetalhe: {e}",
+                parent=self,
+            )
+
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+
+    def _save_nfe_watch_settings(self):
+        """Persiste somente as opções da pasta de NF-e de entrada."""
+        cfg = load_cfg()
+        if not cfg.has_section("test_environment"):
+            cfg.add_section("test_environment")
+        cfg.set(
+            "test_environment",
+            "nfe_input_dir",
+            self.test_nfe_watch_dir.get().strip(),
+        )
+        cfg.set(
+            "test_environment",
+            "nfe_auto_import",
+            bool_to_ini(bool(self.test_nfe_watch_auto.get())),
+        )
+        save_cfg(cfg)
+        self.cfg = cfg
+
+    def _pick_nfe_watch_folder(self):
+        selected = filedialog.askdirectory(
+            parent=self,
+            title="Selecionar pasta de NF-e de entrada",
+        )
+        if not selected:
+            return
+        self.test_nfe_watch_dir.set(selected)
+        self._save_nfe_watch_settings()
+        self.test_nfe_watch_status.set(
+            f"Pasta configurada: {selected}"
+        )
+        self._write_test_user_log(
+            "OK",
+            "PASTA DE NF-e CONFIGURADA",
+            f"Pasta de entrada definida para: {selected}",
+            "Use 'Processar agora' para uma varredura manual ou '▶ Iniciar' para monitoramento automático.",
+        )
+
+    def _nfe_watch_destination_dirs(self):
+        base = self.test_nfe_watch_dir.get().strip()
+        return {
+            "processados": os.path.join(base, "processados"),
+            "duplicados": os.path.join(base, "duplicados"),
+            "erros": os.path.join(base, "erros"),
+        }
+
+    def _move_nfe_watch_file(self, source_path, bucket):
+        dirs = self._nfe_watch_destination_dirs()
+        dest_dir = dirs[bucket]
+        os.makedirs(dest_dir, exist_ok=True)
+
+        base_name = os.path.basename(source_path)
+        dest_path = os.path.join(dest_dir, base_name)
+
+        if os.path.exists(dest_path):
+            stem, ext = os.path.splitext(base_name)
+            dest_path = os.path.join(
+                dest_dir,
+                f"{stem}_{int(time.time())}{ext}",
+            )
+
+        shutil.move(source_path, dest_path)
+        return dest_path
+
+    def _process_nfe_watch_folder(self, show_message=False):
+        """
+        Processa todos os XMLs encontrados na pasta configurada.
+
+        Reutiliza exatamente a mesma rotina já validada de entrada por NF-e.
+        Cada XML é transacionado separadamente.
+        """
+        folder = self.test_nfe_watch_dir.get().strip()
+        if not folder:
+            if show_message:
+                messagebox.showwarning(
+                    "Pasta de NF-e",
+                    "Selecione primeiro a pasta de NF-e de entrada.",
+                    parent=self,
+                )
+            return {
+                "total": 0,
+                "ok": 0,
+                "duplicadas": 0,
+                "erros": 0,
+                "itens": 0,
+            }
+
+        if not os.path.isdir(folder):
+            if show_message:
+                messagebox.showerror(
+                    "Pasta de NF-e",
+                    f"Pasta não encontrada:\n{folder}",
+                    parent=self,
+                )
+            return {
+                "total": 0,
+                "ok": 0,
+                "duplicadas": 0,
+                "erros": 0,
+                "itens": 0,
+            }
+
+        files = sorted(
+            [
+                os.path.join(folder, name)
+                for name in os.listdir(folder)
+                if name.lower().endswith(".xml")
+                and os.path.isfile(os.path.join(folder, name))
+            ]
+        )
+
+        if not files:
+            self.test_nfe_watch_status.set("Nenhum XML encontrado na pasta.")
+            if show_message:
+                messagebox.showinfo(
+                    "Pasta de NF-e",
+                    "Nenhum arquivo XML encontrado na pasta configurada.",
+                    parent=self,
+                )
+            return {
+                "total": 0,
+                "ok": 0,
+                "duplicadas": 0,
+                "erros": 0,
+                "itens": 0,
+            }
+
+        conn = None
+        results = []
+        try:
+            conn = pyodbc.connect(
+                self._build_test_environment_write_conn_str(),
+                timeout=5,
+                autocommit=False,
+            )
+            cur = conn.cursor()
+
+            for file_path in files:
+                result = None
+                try:
+                    nfe = self._read_nfe_xml_for_stock_entry(file_path)
+                    result = self._process_single_nfe_stock_entry(cur, nfe)
+
+                    if result["status"] == "OK":
+                        conn.commit()
+                        moved_to = self._move_nfe_watch_file(
+                            file_path,
+                            "processados",
+                        )
+                        result["movido_para"] = moved_to
+                    elif result["status"] == "DUPLICADA":
+                        conn.rollback()
+                        moved_to = self._move_nfe_watch_file(
+                            file_path,
+                            "duplicados",
+                        )
+                        result["movido_para"] = moved_to
+                    else:
+                        conn.rollback()
+
+                except Exception as e:
+                    conn.rollback()
+                    moved_to = self._move_nfe_watch_file(
+                        file_path,
+                        "erros",
+                    )
+                    result = {
+                        "status": "ERRO",
+                        "num_nf": "",
+                        "arquivo": os.path.basename(file_path),
+                        "itens": 0,
+                        "detalhe": str(e),
+                        "movido_para": moved_to,
+                    }
+
+                results.append(result)
+
+            ok = sum(1 for r in results if r["status"] == "OK")
+            dup = sum(1 for r in results if r["status"] == "DUPLICADA")
+            err = sum(1 for r in results if r["status"] == "ERRO")
+            itens = sum(
+                int(r.get("itens") or 0)
+                for r in results
+                if r["status"] == "OK"
+            )
+
+            if ok > 0 and dup == 0 and err == 0:
+                status_text = (
+                    f"Importação concluída: {ok} NF-e | "
+                    f"Itens lançados: {itens}"
+                )
+                log_level = "OK"
+                log_reason = (
+                    f"{ok} NF-e importada(s) com sucesso. "
+                    f"{itens} item(ns) lançado(s) no estoque."
+                )
+                log_action = (
+                    "Nenhuma ação necessária. XML(s) movido(s) para a pasta processados."
+                )
+            elif ok == 0 and dup > 0 and err == 0:
+                status_text = (
+                    f"NF-e já importada: {dup} | "
+                    "Nenhuma nova entrada realizada"
+                )
+                log_level = "ATENÇÃO"
+                log_reason = (
+                    f"{dup} NF-e já havia(m) sido importada(s) anteriormente. "
+                    "Nenhuma nova entrada de estoque e nenhuma nova movimentação foram criadas."
+                )
+                log_action = (
+                    "Nenhuma ação necessária. A proteção contra duplicidade funcionou "
+                    "e o(s) XML(s) foi(ram) movido(s) para a pasta duplicados."
+                )
+            else:
+                status_text = (
+                    f"Varredura concluída | Importadas: {ok} | "
+                    f"Já importadas: {dup} | Erros: {err} | Itens: {itens}"
+                )
+                log_level = "ATENÇÃO" if err > 0 or dup > 0 else "OK"
+                log_reason = (
+                    f"Importadas: {ok} | Já importadas: {dup} | "
+                    f"Erros: {err} | Itens lançados: {itens}."
+                )
+                log_action = (
+                    "Consulte os detalhes abaixo. Arquivos foram separados em "
+                    "processados, duplicados e erros conforme o resultado."
+                )
+
+            self.test_nfe_watch_status.set(status_text)
+
+            detalhes = []
+            for r in results:
+                if r["status"] == "OK":
+                    resultado_amigavel = "IMPORTADA"
+                elif r["status"] == "DUPLICADA":
+                    resultado_amigavel = "JÁ IMPORTADA - NENHUMA ALTERAÇÃO"
+                else:
+                    resultado_amigavel = "ERRO"
+
+                detalhes.append(
+                    f"{resultado_amigavel} | NF={r.get('num_nf') or '-'} | "
+                    f"{r['arquivo']} | {r['detalhe']} | "
+                    f"Destino={r.get('movido_para', '-')}"
+                )
+
+            self._write_test_user_log(
+                log_level,
+                "PROCESSAMENTO DA PASTA DE NF-e",
+                log_reason,
+                log_action,
+                detalhes,
+            )
+
+            self.after(0, self._refresh_test_stock)
+            self.after(0, self._refresh_test_moves)
+
+            if show_message:
+                messagebox.showinfo(
+                    "Pasta de NF-e",
+                    (
+                        f"Arquivos encontrados: {len(results)}\n"
+                        f"NF-e importadas: {ok}\n"
+                        f"NF-e já importadas: {dup}\n"
+                        f"Com erro: {err}\n"
+                        f"Itens lançados: {itens}\n\n"
+                        + (
+                            "Nenhuma alteração foi realizada no estoque."
+                            if ok == 0 and dup > 0 and err == 0
+                            else ""
+                        )
+                    ),
+                    parent=self,
+                )
+
+            return {
+                "total": len(results),
+                "ok": ok,
+                "duplicadas": dup,
+                "erros": err,
+                "itens": itens,
+            }
+
+        except Exception as e:
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            self.test_nfe_watch_status.set(
+                f"Falha no processamento da pasta: {e}"
+            )
+            if show_message:
+                messagebox.showerror(
+                    "Pasta de NF-e",
+                    f"Falha ao processar a pasta.\n\nDetalhe: {e}",
+                    parent=self,
+                )
+            return {
+                "total": 0,
+                "ok": 0,
+                "duplicadas": 0,
+                "erros": 1,
+                "itens": 0,
+            }
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def _process_nfe_watch_folder_now(self):
+        self._save_nfe_watch_settings()
+        folder = self.test_nfe_watch_dir.get().strip()
+        self._write_test_user_log(
+            "OK",
+            "VARREDURA MANUAL DE NF-e",
+            f"Usuário solicitou processamento imediato da pasta: {folder or '(não configurada)'}",
+            "Os XMLs encontrados serão processados usando a mesma regra validada de entrada de estoque.",
+        )
+        self._process_nfe_watch_folder(show_message=True)
+
+    def _nfe_watch_loop(self):
+        while not self._nfe_watch_stop.is_set():
+            try:
+                if self._nfe_watch_enabled:
+                    self._process_nfe_watch_folder(show_message=False)
+            except Exception:
+                pass
+
+            # Verificação da pasta a cada 30 segundos.
+            # O Event permite encerrar rapidamente ao clicar em Parar.
+            self._nfe_watch_stop.wait(30)
+
+    def _restore_nfe_watch_from_ini(self):
+        """
+        Restaura o estado PLAY salvo no config.ini.
+
+        Se nfe_auto_import=yes e a pasta ainda existir, o monitor volta
+        automaticamente sem exigir novo clique do usuário.
+        """
+        if not bool(self.test_nfe_watch_auto.get()):
+            return
+
+        folder = self.test_nfe_watch_dir.get().strip()
+        if not folder or not os.path.isdir(folder):
+            self.test_nfe_watch_auto.set(False)
+            self._nfe_watch_enabled = False
+            self._save_nfe_watch_settings()
+            self.btn_nfe_watch_start.configure(state="normal")
+            self.btn_nfe_watch_stop.configure(state="disabled")
+            self.test_nfe_watch_status.set(
+                "■ Monitoramento não restaurado — pasta configurada não está disponível."
+            )
+            self._write_test_user_log(
+                "ATENÇÃO",
+                "MONITOR DE NF-e NÃO RESTAURADO",
+                "O monitor estava salvo como ativo, mas a pasta configurada não foi encontrada.",
+                "Selecione novamente uma pasta válida e clique em ▶ Iniciar.",
+                [f"Pasta configurada: {folder or '-'}"],
+            )
+            return
+
+        self._nfe_watch_enabled = True
+        self._nfe_watch_stop.clear()
+
+        if (
+            self._nfe_watch_thread is None
+            or not self._nfe_watch_thread.is_alive()
+        ):
+            self._nfe_watch_thread = threading.Thread(
+                target=self._nfe_watch_loop,
+                name="NFeInputWatch",
+                daemon=True,
+            )
+            self._nfe_watch_thread.start()
+
+        self.btn_nfe_watch_start.configure(state="disabled")
+        self.btn_nfe_watch_stop.configure(state="normal")
+        self.test_nfe_watch_status.set(
+            f"▶ MONITORANDO — restaurado automaticamente | Varredura: 30 s | {folder}"
+        )
+
+        self._write_test_user_log(
+            "OK",
+            "MONITOR DE NF-e RESTAURADO",
+            "A aplicação foi aberta e restaurou automaticamente o monitor que estava em PLAY.",
+            "A pasta continuará sendo verificada a cada 30 segundos.",
+            [f"Pasta monitorada: {folder}"],
+        )
+
+        # Primeira varredura logo após restaurar.
+        self.after(100, self._process_nfe_watch_folder_now_silent)
+
+    def _start_nfe_watch(self):
+        folder = self.test_nfe_watch_dir.get().strip()
+
+        if not folder or not os.path.isdir(folder):
+            messagebox.showwarning(
+                "Monitor de NF-e",
+                "Selecione uma pasta válida antes de iniciar o monitoramento.",
+                parent=self,
+            )
+            return
+
+        self._nfe_watch_enabled = True
+        self.test_nfe_watch_auto.set(True)
+        self._nfe_watch_stop.clear()
+        self._save_nfe_watch_settings()
+
+        if (
+            self._nfe_watch_thread is None
+            or not self._nfe_watch_thread.is_alive()
+        ):
+            self._nfe_watch_thread = threading.Thread(
+                target=self._nfe_watch_loop,
+                name="NFeInputWatch",
+                daemon=True,
+            )
+            self._nfe_watch_thread.start()
+
+        self.btn_nfe_watch_start.configure(state="disabled")
+        self.btn_nfe_watch_stop.configure(state="normal")
+        self.test_nfe_watch_status.set(
+            f"▶ MONITORANDO — aguardando XMLs em: {folder} | Varredura: 30 s"
+        )
+
+        self._write_test_user_log(
+            "OK",
+            "MONITOR DE NF-e INICIADO",
+            f"Monitoramento automático iniciado na pasta: {folder}",
+            "A aplicação fará uma primeira varredura agora e depois repetirá a cada 30 segundos.",
+        )
+
+        # Faz uma primeira varredura imediatamente ao clicar em Play.
+        self.after(100, self._process_nfe_watch_folder_now_silent)
+
+    def _process_nfe_watch_folder_now_silent(self):
+        if self._nfe_watch_enabled:
+            self._process_nfe_watch_folder(show_message=False)
+
+    def _stop_nfe_watch(self):
+        self._nfe_watch_enabled = False
+        self.test_nfe_watch_auto.set(False)
+        self._nfe_watch_stop.set()
+        self._save_nfe_watch_settings()
+
+        self.btn_nfe_watch_start.configure(state="normal")
+        self.btn_nfe_watch_stop.configure(state="disabled")
+        self.test_nfe_watch_status.set("■ Monitoramento parado.")
+
+        self._write_test_user_log(
+            "OK",
+            "MONITOR DE NF-e PARADO",
+            "Monitoramento automático da pasta de NF-e foi interrompido pelo usuário.",
+            "Use '▶ Iniciar' para voltar a monitorar a pasta.",
+        )
+
+    def _toggle_nfe_watch(self):
+        """Compatibilidade interna: direciona para os novos botões Play/Stop."""
+        if self._nfe_watch_enabled:
+            self._stop_nfe_watch()
+        else:
+            self._start_nfe_watch()
+
+
+    def _ensure_test_movement_description_column(self, cur):
+        """
+        Valida somente a existência de DESCRICAO_ITEM em dbo.movEstambTeste.
+
+        IMPORTANTE:
+        - não cria coluna;
+        - não altera estrutura do banco;
+        - não executa UPDATE de movimentos antigos;
+        - evita exigir permissão ALTER TABLE do usuário da aplicação.
+        """
+        cur.execute(
+            "SELECT COL_LENGTH('dbo.movEstambTeste', 'DESCRICAO_ITEM')"
+        )
+        if cur.fetchone()[0] is None:
+            raise RuntimeError(
+                "A coluna dbo.movEstambTeste.DESCRICAO_ITEM não existe. "
+                "Crie a coluna uma única vez com um usuário administrador do SQL Server."
+            )
+
+
     def _build_readonly_grid(self, parent, tree_attr, status_attr, columns, refresh_command):
         toolbar = ttk.Frame(parent)
         toolbar.pack(fill="x", padx=6, pady=(8, 4))
@@ -1444,6 +2773,36 @@ class ConfigUI(tk.Tk):
         self.update_idletasks()
         try:
             columns, rows = self._read_test_table("ESTOQUE")
+
+            # Exibe primeiro os itens mais recentemente incluídos/atualizados.
+            # Não altera nenhum dado do estoque; muda somente a ordem visual da grade.
+            normalized_columns = {
+                re.sub(r"[^a-z0-9]", "", str(name).lower()): idx
+                for idx, name in enumerate(columns)
+            }
+            data_idx = next(
+                (
+                    normalized_columns[k]
+                    for k in (
+                        "dataatualizacao",
+                        "atualizacao",
+                        "datahora",
+                        "dtatualizacao",
+                    )
+                    if k in normalized_columns
+                ),
+                None,
+            )
+            if data_idx is not None:
+                rows = sorted(
+                    rows,
+                    key=lambda r: (
+                        r[data_idx] is not None,
+                        r[data_idx] if r[data_idx] is not None else "",
+                    ),
+                    reverse=True,
+                )
+
             for row in rows:
                 m = dict(zip(columns, row))
                 values = [
@@ -1456,6 +2815,10 @@ class ConfigUI(tk.Tk):
                     self._column_value(m, ["IDENT_TERMINAL", "Terminal", "ColetorID", "TerminalID"]),
                 ]
                 tree.insert("", "end", values=[self._format_test_value(v) for v in values])
+
+            # Após atualizar, mantém a grade posicionada no topo.
+            tree.yview_moveto(0)
+
             status.set("Banco vazio: nenhum registro encontrado." if not rows else f"{len(rows)} registro(s) carregado(s).")
         except Exception as e:
             status.set("Falha na consulta.")
@@ -1467,6 +2830,8 @@ class ConfigUI(tk.Tk):
         status.set("Consultando est_ambTestes.dbo.movEstambTeste...")
         self.update_idletasks()
         try:
+            # A estrutura da tabela é administrada no SQL Server.
+            # Aqui apenas lemos os dados; nenhuma alteração estrutural é tentada.
             columns, rows = self._read_test_table("movEstambTeste")
 
             # Nome do cliente vem do banco local logConf, relacionando
@@ -1529,8 +2894,11 @@ class ConfigUI(tk.Tk):
                 detalhe = self._column_value(
                     m, ["DETALHE", "Detalhe", "Mensagem", "Observacao", "Motivo"]
                 )
-                descricao = ""
-                if detalhe:
+                descricao = self._column_value(
+                    m,
+                    ["DESCRICAO_ITEM", "Descricao", "DescProd", "DescricaoProduto"],
+                )
+                if not descricao and detalhe:
                     partes = str(detalhe).split("|")
                     if len(partes) >= 2:
                         descricao = partes[1].strip()
@@ -1686,129 +3054,585 @@ class ConfigUI(tk.Tk):
             command=self._refresh_status_tab,
         ).pack(side="left")
 
-    def _build_about_tab(self):
-        container = ttk.Frame(self.tab_about, padding=28)
-        container.pack(fill="both", expand=True)
 
-        content = ttk.Frame(container)
-        content.pack(anchor="nw", fill="x", padx=12, pady=10)
+    def _clear_logs_after_test_reset(self):
+        """Limpa somente os logs quando o usuário optar por isso após o reset."""
+        log_dir = self.cfg.get(
+            "logging", "log_dir", fallback=r"C:\MIS\logs"
+        ).strip() or r"C:\MIS\logs"
 
-        # Logo menor no canto superior esquerdo.
+        cleared = 0
+        errors = []
+
         try:
-            logo_path = resource_path(os.path.join("assets", "logo_2a.png"))
-            image = Image.open(logo_path)
-            image.thumbnail((210, 54), Image.LANCZOS)
-            self._about_logo = ImageTk.PhotoImage(image)
+            os.makedirs(log_dir, exist_ok=True)
+            for name in os.listdir(log_dir):
+                path = os.path.join(log_dir, name)
+                if os.path.isfile(path) and name.lower().endswith(".log"):
+                    try:
+                        with open(path, "w", encoding="utf-8"):
+                            pass
+                        cleared += 1
+                    except Exception as exc:
+                        errors.append(f"{name}: {exc}")
+        except Exception as exc:
+            errors.append(f"Pasta de logs: {exc}")
 
-            ttk.Label(
-                content,
-                image=self._about_logo,
-            ).pack(anchor="w", pady=(0, 24))
+        # Nova primeira entrada após apagar o histórico.
+        try:
+            self._write_test_user_log(
+                "OK",
+                "AMBIENTE DE TESTES RESETADO E LOGS LIMPOS",
+                "O usuário optou por apagar os logs após resetar o Ambiente de Testes.",
+                "Configurações, conexões e pastas foram preservadas.",
+                [f"Arquivos de log limpos: {cleared}"],
+            )
+        except Exception as exc:
+            errors.append(f"Registro da limpeza: {exc}")
+
+        try:
+            self._refresh_status_tab()
         except Exception:
-            ttk.Label(
-                content,
-                text="2A Tecnologia",
-                font=("Segoe UI", 16),
-            ).pack(anchor="w", pady=(0, 24))
+            pass
 
-        # Produto + versão na mesma linha, sem negrito e em tamanho discreto.
-        title_row = ttk.Frame(content)
-        title_row.pack(anchor="w", fill="x")
+        if errors:
+            messagebox.showwarning(
+                "Limpeza de Logs",
+                "O reset foi concluído, mas a limpeza dos logs foi parcial.\\n\\n"
+                + "\\n".join(errors[:8]),
+                parent=self,
+            )
 
-        ttk.Label(
-            title_row,
-            text="ImportFiles LogConf",
-            font=("Segoe UI", 13),
-        ).pack(side="left")
-
-        ttk.Label(
-            title_row,
-            text="   |   ",
-            font=("Segoe UI", 11),
-        ).pack(side="left")
-
-        ttk.Label(
-            title_row,
-            text=f"Versão {APP_VERSION} | Build {BUILD_DATE}",
-            font=("Segoe UI", 11),
-        ).pack(side="left")
-
-        ttk.Separator(content, orient="horizontal").pack(
-            fill="x", pady=(16, 20)
-        )
-
-        ttk.Label(
-            content,
-            text=(
-                "Sistema para integração de dados de conferência para processos de\n"
-                "recebimento, expedição e separação de mercadorias."
-            ),
-            justify="left",
-            font=("Segoe UI", 11),
-        ).pack(anchor="w", pady=(0, 20))
-
-        ttk.Separator(content, orient="horizontal").pack(
-            fill="x", pady=(0, 20)
-        )
-
-        ttk.Label(
-            content,
-            text="Desenvolvido por 2A Tecnologia",
-            font=("Segoe UI", 11),
-        ).pack(anchor="w", pady=(0, 14))
-
-        contacts = ttk.Frame(content)
-        contacts.pack(anchor="w", pady=(0, 18))
-
-        self._about_contact_icons = []
-
-        contact_rows = [
-            ("whatsapp.png", "Telefone / WhatsApp:", "(11) 95246-9907"),
-            ("email.png", "E-mail:", "faleconosco@2atecnologia.com.br"),
-            ("site.png", "Site:", "2atec.com.br"),
+    def _add_context_help_buttons(self):
+        """Adiciona um botão ? discreto no canto superior direito de cada aba."""
+        tab_topics = [
+            (self.tab_sql, "Banco Local logConf"),
+            (self.tab_paths, "Pastas"),
+            (self.tab_input, "Entrada (XML/TXT)"),
+            (self.tab_app, "Aplicação"),
+            (self.tab_output, "Arquivos de Saída"),
+            (self.tab_connector, "Fonte de Dados Externa"),
+            (self.tab_test_environment, "Ambiente de Testes"),
+            (self.tab_status, "Status / Logs"),
         ]
 
-        for row, (icon_name, label_text, value_text) in enumerate(contact_rows):
+        for tab, topic in tab_topics:
+            btn = ttk.Button(
+                tab,
+                text="?",
+                width=3,
+                command=lambda t=topic: self._open_help_topic(t),
+            )
+            # Posicionamento independente para não mexer no layout já validado.
+            btn.place(relx=1.0, x=-12, y=8, anchor="ne")
+            btn.lift()
+
+    def _build_help_tab(self):
+        """Ajuda local e objetiva sobre cada área do Gestor de Dados."""
+        container = ttk.Frame(self.tab_help)
+        container.pack(fill="both", expand=True, padx=10, pady=10)
+
+        ttk.Label(
+            container,
+            text="Ajuda do Gestor de Dados",
+            font=("Segoe UI", 13, "bold"),
+        ).pack(anchor="w", pady=(0, 4))
+
+        ttk.Label(
+            container,
+            text=(
+                "Selecione uma área à esquerda para ver uma explicação rápida "
+                "sobre sua finalidade e os principais recursos."
+            ),
+        ).pack(anchor="w", pady=(0, 10))
+
+        body = ttk.Frame(container)
+        body.pack(fill="both", expand=True)
+
+        left = ttk.Frame(body)
+        left.pack(side="left", fill="y", padx=(0, 10))
+
+        right = ttk.Frame(body)
+        right.pack(side="left", fill="both", expand=True)
+
+        self.help_topics = {
+            "Banco Local logConf": (
+                "BANCO LOCAL logConf\n\n"
+                "Configura a conexão com o banco SQL utilizado pelo sistema principal.\n\n"
+                "• Driver ODBC: driver instalado no Windows para acesso ao SQL Server.\n"
+                "• Servidor: endereço, nome da máquina ou instância do SQL Server.\n"
+                "• Banco: banco local utilizado pelo sistema.\n"
+                "• Autenticação: pode utilizar usuário/senha SQL ou autenticação do Windows.\n"
+                "• Testar conexão: confirma se os parâmetros informados permitem acesso ao banco.\n\n"
+                "Alterações nesta área afetam somente a conexão com o banco local."
+            ),
+            "Pastas": (
+                "PASTAS\n\n"
+                "Define os diretórios utilizados pelo importador para receber e organizar arquivos.\n\n"
+                "• Entrada: pasta monitorada pelo importador.\n"
+                "• Processados: arquivos concluídos com sucesso.\n"
+                "• Erros: arquivos que não puderam ser processados.\n"
+                "• Duplicados: arquivos reconhecidos como repetidos.\n"
+                "• Pasta de logs: local onde ficam os registros da aplicação.\n\n"
+                "Evite alterar essas pastas durante uma operação em andamento."
+            ),
+            "Entrada (XML/TXT)": (
+                "ENTRADA (XML/TXT)\n\n"
+                "Define o formato dos arquivos recebidos pelo fluxo principal.\n\n"
+                "• Formato XML/TXT: escolha conforme o tipo de arquivo utilizado.\n"
+                "• Delimitador: separador usado em arquivos TXT.\n"
+                "• Encoding: codificação do arquivo.\n"
+                "• Primeira linha é cabeçalho: indica se o TXT possui nomes de colunas.\n\n"
+                "Essas opções pertencem ao fluxo principal de importação."
+            ),
+            "Aplicação": (
+                "APLICAÇÃO\n\n"
+                "Contém parâmetros gerais de funcionamento do importador.\n\n"
+                "• Status inicial: estado atribuído ao registro quando aplicável.\n"
+                "• Agrupar itens iguais: soma itens repetidos antes da gravação, quando ativado.\n\n"
+                "Altere somente quando souber qual comportamento deseja aplicar ao fluxo principal."
+            ),
+            "Arquivos de Saída": (
+                "ARQUIVOS DE SAÍDA\n\n"
+                "Controla os arquivos gerados pelo sistema após as conferências.\n\n"
+                "• Pasta de saída: local onde os arquivos serão gravados.\n"
+                "• Campos a exportar: define quais informações serão incluídas.\n"
+                "• Arquivo individual: gera um arquivo por conferência.\n"
+                "• Arquivo diário: mantém um arquivo acumulado do dia.\n"
+                "• Separador e nome do arquivo: ajustam o formato final.\n\n"
+                "Essas opções não alteram os dados já gravados no banco."
+            ),
+            "Fonte de Dados Externa": (
+                "FONTE DE DADOS EXTERNA\n\n"
+                "Configura o banco do ERP externo usado para simular e realizar lançamentos de estoque.\n\n"
+                "• Nova conexão: inicia o assistente para cadastrar uma fonte externa.\n"
+                "• Editar: altera os dados da conexão atual.\n"
+                "• Excluir: remove a configuração externa.\n"
+                "• Testar conexão: verifica o acesso ao banco informado.\n\n"
+                "O controle de execução dessa integração é independente do importador principal."
+            ),
+            "Ambiente de Testes": (
+                "AMBIENTE DE TESTES\n\n"
+                "Área isolada para validar entradas e movimentações de estoque sem utilizar o estoque real do ERP.\n\n"
+                "• Resetar Ambiente: limpa os dados de teste e prepara um novo cenário. Após o reset, pergunta se deseja apagar também os logs.\n"
+                "• Carregar Banco de Exemplo: restaura o estoque de exemplo.\n"
+                "• Importar Estoque: carrega um TXT/CSV de estoque.\n"
+                "• Importar 1 ou vários XMLs: realiza entradas de estoque por NF-e.\n"
+                "• Pasta de NF-e de Entrada: define uma pasta para importação automática.\n"
+                "• ▶ Iniciar: inicia o monitoramento da pasta a cada 30 segundos.\n"
+                "• ■ Parar: interrompe somente o monitor de NF-e.\n"
+                "• Processar agora: executa uma varredura imediata da pasta.\n"
+                "• Estoque Atual: mostra a posição atual dos produtos.\n"
+                "• Editar Saldo Manualmente: permite ajustar o saldo de um produto de teste.\n"
+                "• Movimentações: mostra o histórico de entradas e ajustes.\n\n"
+                "NF-e já importada não é lançada novamente. Produto existente recebe acréscimo no saldo; "
+                "produto novo é cadastrado automaticamente."
+            ),
+            "Status / Logs": (
+                "STATUS / LOGS\n\n"
+                "Mostra o estado atual da aplicação e os registros gerados durante a operação.\n\n"
+                "• Importador: indica se o processo principal está ativo.\n"
+                "• SQL Server: mostra o estado da conexão.\n"
+                "• Arquivos pendentes: quantidade de arquivos aguardando processamento.\n"
+                "• Último resultado: última ação relevante registrada.\n"
+                "• Log do Usuário: mensagens mais claras e orientadas à operação.\n"
+                "• Log Técnico: detalhes utilizados para diagnóstico.\n\n"
+                "Em caso de falha, consulte primeiro o Log do Usuário."
+            ),
+        }
+
+        self.help_list = tk.Listbox(
+            left,
+            width=28,
+            height=16,
+            exportselection=False,
+        )
+        self.help_list.pack(fill="y", expand=False)
+
+        for topic in self.help_topics:
+            self.help_list.insert("end", topic)
+
+        self.help_list.bind("<<ListboxSelect>>", self._on_help_topic_selected)
+
+        text_frame = ttk.Frame(right)
+        text_frame.pack(fill="both", expand=True)
+
+        self.help_text = tk.Text(
+            text_frame,
+            wrap="word",
+            state="disabled",
+            relief="sunken",
+            borderwidth=1,
+            font=("Segoe UI", 10),
+        )
+        help_scroll = ttk.Scrollbar(
+            text_frame,
+            orient="vertical",
+            command=self.help_text.yview,
+        )
+        self.help_text.configure(yscrollcommand=help_scroll.set)
+
+        self.help_text.pack(side="left", fill="both", expand=True)
+        help_scroll.pack(side="right", fill="y")
+
+        # Abre a ajuda já no primeiro tópico.
+        self.help_list.selection_set(0)
+        self.help_list.activate(0)
+        self._show_help_topic("Banco Local logConf")
+
+    def _show_help_topic(self, topic):
+        content = self.help_topics.get(topic, "")
+        self.help_text.configure(state="normal")
+        self.help_text.delete("1.0", "end")
+        self.help_text.insert("1.0", content)
+        self.help_text.configure(state="disabled")
+        self.help_text.see("1.0")
+
+    def _on_help_topic_selected(self, event=None):
+        selection = self.help_list.curselection()
+        if not selection:
+            return
+        topic = self.help_list.get(selection[0])
+        self._show_help_topic(topic)
+
+    def _open_help_topic(self, topic):
+        """Abre a aba Ajuda já posicionada no assunto solicitado."""
+        self.nb.select(self.tab_help)
+
+        try:
+            topics = list(self.help_topics.keys())
+            idx = topics.index(topic)
+        except Exception:
+            idx = 0
+
+        self.help_list.selection_clear(0, "end")
+        self.help_list.selection_set(idx)
+        self.help_list.activate(idx)
+        self.help_list.see(idx)
+        self._show_help_topic(topics[idx])
+
+    def _open_context_help(self):
+        """Abre a ajuda correspondente à aba atual."""
+        current = self.nb.select()
+
+        mapping = {
+            str(self.tab_sql): "Banco Local logConf",
+            str(self.tab_paths): "Pastas",
+            str(self.tab_input): "Entrada (XML/TXT)",
+            str(self.tab_app): "Aplicação",
+            str(self.tab_output): "Arquivos de Saída",
+            str(self.tab_connector): "Fonte de Dados Externa",
+            str(self.tab_test_environment): "Ambiente de Testes",
+            str(self.tab_status): "Status / Logs",
+        }
+
+        # Demais abas são identificadas pelo texto da própria guia.
+        topic = mapping.get(current)
+        if topic is None:
             try:
-                icon_path = resource_path(os.path.join("assets", icon_name))
-                icon_img = Image.open(icon_path)
-                icon_img.thumbnail((22, 22), Image.LANCZOS)
-                icon_photo = ImageTk.PhotoImage(icon_img)
-                self._about_contact_icons.append(icon_photo)
-
-                ttk.Label(
-                    contacts,
-                    image=icon_photo,
-                ).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=7)
+                topic = self.nb.tab(current, "text")
             except Exception:
-                ttk.Label(
-                    contacts,
-                    text="",
-                    width=3,
-                ).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=7)
+                topic = "Banco Local logConf"
 
-            ttk.Label(
-                contacts,
-                text=label_text,
-                font=("Segoe UI", 10, "bold"),
-            ).grid(row=row, column=1, sticky="w", padx=(0, 12), pady=7)
+        if topic not in self.help_topics:
+            topic = "Banco Local logConf"
 
-            ttk.Label(
-                contacts,
-                text=value_text,
-                font=("Segoe UI", 10),
-            ).grid(row=row, column=2, sticky="w", pady=7)
+        self._open_help_topic(topic)
 
-        ttk.Separator(content, orient="horizontal").pack(
-            fill="x", pady=(0, 18)
+    def _build_about_tab(self):
+        """Tela Sobre com a estrutura inicial do futuro licenciamento."""
+        container = ttk.Frame(self.tab_about)
+        container.pack(fill="both", expand=True, padx=18, pady=18)
+
+        ttk.Label(
+            container,
+            text="Gestor de Dados - 2A Tecnologia",
+            font=("Segoe UI", 14, "bold"),
+        ).pack(anchor="w")
+
+        ttk.Label(
+            container,
+            text="Importador e gerenciador de dados",
+            font=("Segoe UI", 10),
+        ).pack(anchor="w", pady=(2, 16))
+
+        info = ttk.LabelFrame(container, text="Informações da Aplicação")
+        info.pack(fill="x", pady=(0, 12))
+
+        ttk.Label(info, text="Versão:").grid(
+            row=0, column=0, sticky="w", padx=10, pady=(10, 4)
+        )
+        ttk.Label(info, text=APP_VERSION).grid(
+            row=0, column=1, sticky="w", padx=10, pady=(10, 4)
+        )
+
+        ttk.Label(info, text="Build:").grid(
+            row=1, column=0, sticky="w", padx=10, pady=4
+        )
+        ttk.Label(info, text=BUILD_DATE).grid(
+            row=1, column=1, sticky="w", padx=10, pady=4
+        )
+
+        ttk.Label(info, text="Fornecedor:").grid(
+            row=2, column=0, sticky="w", padx=10, pady=(4, 10)
+        )
+        ttk.Label(info, text="2A Tecnologia").grid(
+            row=2, column=1, sticky="w", padx=10, pady=(4, 10)
+        )
+
+        license_box = ttk.LabelFrame(container, text="Licenciamento e Suporte")
+        license_box.pack(fill="x", pady=(0, 12))
+        license_box.columnconfigure(1, weight=1)
+
+        ttk.Label(license_box, text="Código de Suporte:").grid(
+            row=0, column=0, sticky="w", padx=10, pady=(10, 5)
+        )
+
+        self.support_code_var = tk.StringVar(value=self._get_support_code())
+        support_entry = ttk.Entry(
+            license_box,
+            textvariable=self.support_code_var,
+            state="readonly",
+            width=42,
+        )
+        support_entry.grid(
+            row=0, column=1, sticky="ew", padx=(0, 5), pady=(10, 5)
+        )
+
+        # Facilita o envio do Código de Suporte: botão de prancheta e
+        # menu de contexto com o botão direito.
+        ttk.Button(
+            license_box,
+            text="Copiar",
+            width=7,
+            command=self._copy_support_code,
+        ).grid(row=0, column=2, sticky="w", padx=(0, 10), pady=(10, 5))
+
+        self.support_code_menu = tk.Menu(self, tearoff=0)
+        self.support_code_menu.add_command(
+            label="Copiar Código de Suporte",
+            command=self._copy_support_code,
+        )
+        support_entry.bind("<Button-3>", self._show_support_code_menu)
+
+        ttk.Label(license_box, text="Status da Licença:").grid(
+            row=1, column=0, sticky="w", padx=10, pady=5
+        )
+        self.license_status_var = tk.StringVar(value="Não ativada")
+        ttk.Label(
+            license_box,
+            textvariable=self.license_status_var,
+            font=("Segoe UI", 10, "bold"),
+        ).grid(row=1, column=1, sticky="w", padx=(0, 10), pady=5)
+
+        ttk.Label(license_box, text="Período válido:").grid(
+            row=2, column=0, sticky="w", padx=10, pady=5
+        )
+        self.license_period_var = tk.StringVar(value="Não informado")
+        ttk.Label(
+            license_box,
+            textvariable=self.license_period_var,
+        ).grid(row=2, column=1, sticky="w", padx=(0, 10), pady=5)
+
+        buttons = ttk.Frame(license_box)
+        buttons.grid(
+            row=3, column=0, columnspan=2, sticky="w",
+            padx=10, pady=(8, 12)
+        )
+
+        ttk.Button(
+            buttons,
+            text="Ativar Licença",
+            command=self._license_activation_placeholder,
+        ).pack(side="left")
+
+        ttk.Button(
+            buttons,
+            text="Enviar Código de Suporte",
+            command=self._send_support_code_placeholder,
+        ).pack(side="left", padx=(8, 0))
+
+        ttk.Label(
+            license_box,
+            text=(
+                "A ativação e o envio do Código de Suporte serão configurados "
+                "nas próximas etapas do licenciamento."
+            ),
+            wraplength=700,
+        ).grid(
+            row=4, column=0, columnspan=2,
+            sticky="w", padx=10, pady=(0, 10)
         )
 
         ttk.Label(
-            content,
-            text="© 2026 2A Tecnologia\nTodos os direitos reservados.",
-            justify="left",
-            font=("Segoe UI", 9),
-        ).pack(anchor="w")
+            container,
+            text="© 2026 2A Tecnologia. Todos os direitos reservados.",
+        ).pack(anchor="w", pady=(8, 0))
+
+    def _get_support_code(self):
+        """
+        Gera um Código de Suporte estável por máquina física.
+
+        Prioridade:
+        1. UUID do equipamento via Win32_ComputerSystemProduct.UUID
+        2. Serial da BIOS
+        3. Serial da placa-mãe
+        4. MachineGuid do Windows apenas como último fallback
+
+        Assim, uma simples reinicialização ou formatação do Windows não deve
+        alterar o Código de Suporte quando o hardware principal permanece igual.
+        """
+        raw_parts = []
+
+        def _run_powershell(command):
+            try:
+                result = subprocess.run(
+                    [
+                        "powershell",
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command",
+                        command,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=8,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                if result.returncode != 0:
+                    return ""
+                return (result.stdout or "").strip()
+            except Exception:
+                return ""
+
+        # 1) UUID físico do equipamento (firmware / placa-mãe)
+        uuid_hw = _run_powershell(
+            "(Get-CimInstance Win32_ComputerSystemProduct).UUID"
+        )
+        uuid_hw = uuid_hw.strip()
+
+        invalid_uuid_values = {
+            "",
+            "00000000-0000-0000-0000-000000000000",
+            "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
+            "TO BE FILLED BY O.E.M.",
+            "DEFAULT STRING",
+            "NONE",
+            "UNKNOWN",
+        }
+
+        if uuid_hw.upper() not in invalid_uuid_values:
+            raw_parts.append("UUID=" + uuid_hw.upper())
+
+        # 2) Serial da BIOS
+        bios_serial = _run_powershell(
+            "(Get-CimInstance Win32_BIOS).SerialNumber"
+        ).strip()
+
+        invalid_serial_values = {
+            "",
+            "TO BE FILLED BY O.E.M.",
+            "DEFAULT STRING",
+            "NONE",
+            "UNKNOWN",
+            "SYSTEM SERIAL NUMBER",
+        }
+
+        if bios_serial.upper() not in invalid_serial_values:
+            raw_parts.append("BIOS=" + bios_serial.upper())
+
+        # 3) Serial da placa-mãe
+        board_serial = _run_powershell(
+            "(Get-CimInstance Win32_BaseBoard).SerialNumber"
+        ).strip()
+
+        if board_serial.upper() not in invalid_serial_values:
+            raw_parts.append("BOARD=" + board_serial.upper())
+
+        # Se o UUID físico existe, ele é a principal âncora do código.
+        # BIOS/BaseBoard entram junto para reduzir colisões em fabricantes ruins.
+        if raw_parts:
+            raw = "|".join(raw_parts)
+        else:
+            # 4) Último fallback: MachineGuid do Windows.
+            # Esse valor pode mudar após formatação/reinstalação.
+            raw = ""
+            try:
+                import winreg
+                access = winreg.KEY_READ
+                try:
+                    access |= winreg.KEY_WOW64_64KEY
+                except Exception:
+                    pass
+
+                with winreg.OpenKey(
+                    winreg.HKEY_LOCAL_MACHINE,
+                    r"SOFTWARE\Microsoft\Cryptography",
+                    0,
+                    access,
+                ) as key:
+                    raw = str(
+                        winreg.QueryValueEx(key, "MachineGuid")[0]
+                    ).strip()
+            except Exception:
+                pass
+
+            if not raw:
+                try:
+                    import platform
+                    raw = "|".join(
+                        [
+                            platform.node(),
+                            platform.machine(),
+                            platform.system(),
+                        ]
+                    )
+                except Exception:
+                    raw = "GESTOR-DADOS"
+
+        import hashlib
+        digest = hashlib.sha256(
+            raw.encode("utf-8", errors="ignore")
+        ).hexdigest().upper()
+
+        # Código curto e fácil de informar.
+        code = digest[:20]
+        return "-".join(
+            code[i:i + 5]
+            for i in range(0, 20, 5)
+        )
+
+    def _copy_support_code(self):
+        code = self.support_code_var.get().strip()
+        if not code:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(code)
+        self.update_idletasks()
+
+    def _show_support_code_menu(self, event):
+        try:
+            self.support_code_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.support_code_menu.grab_release()
+
+    def _license_activation_placeholder(self):
+        messagebox.showinfo(
+            "Ativar Licença",
+            "A tela de licenciamento está preparada.\n\n"
+            "A regra de ativação será implementada na próxima etapa.",
+            parent=self,
+        )
+
+    def _send_support_code_placeholder(self):
+        messagebox.showinfo(
+            "Enviar Código de Suporte",
+            "Código de Suporte desta máquina:\n\n"
+            f"{self.support_code_var.get()}\n\n"
+            "O envio será configurado em uma próxima etapa.",
+            parent=self,
+        )
 
     def _on_main_tab_changed(self, event=None):
         """Maximiza somente a aba Ambiente de Testes e restaura nas demais."""
@@ -1849,6 +3673,9 @@ class ConfigUI(tk.Tk):
         if initial == "status":
             self.nb.select(self.tab_status)
             self._refresh_status_tab()
+        elif initial == "help":
+            self.nb.select(self.tab_help)
+            self.update_idletasks()
         elif initial == "about":
             self.nb.select(self.tab_about)
             self.update_idletasks()
@@ -3059,6 +4886,16 @@ class ConfigUI(tk.Tk):
 
     def _save_and_close(self):
         """Salva o estado atual de todas as abas e fecha somente se salvar com sucesso."""
+        # Importante: primeiro persiste se o monitor estava em PLAY ou STOP.
+        # Só depois encerra a thread desta execução.
+        try:
+            self._save_nfe_watch_settings()
+        except Exception:
+            pass
+
+        self._nfe_watch_enabled = False
+        self._nfe_watch_stop.set()
+
         if self._save(show_message=False):
             self.destroy()
 
