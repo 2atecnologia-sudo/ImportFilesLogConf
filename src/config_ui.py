@@ -98,6 +98,13 @@ class ConfigUI(tk.Tk):
     def __init__(self, initial_tab="config"):
         super().__init__()
         self.title("Gestor de Dados - 2A Tecnologia")
+        try:
+            self.state("zoomed")
+        except Exception:
+            try:
+                self.attributes("-zoomed", True)
+            except Exception:
+                pass
 
         # Ícone da janela. Salvar como assets/gestor_dados_icon.png
         try:
@@ -176,6 +183,9 @@ class ConfigUI(tk.Tk):
         self.nb.add(tab_connector, text="Fonte de Dados Externa")
         self.nb.add(self.tab_test_environment, text="Ambiente de Testes")
         self.nb.add(self.tab_status, text="Status / Logs")
+
+        self.tab_licensing_admin = ttk.Frame(self.nb)
+        self.nb.add(self.tab_licensing_admin, text="Licenciamento (Admin)")
 
         self.tab_help = ttk.Frame(self.nb)
         self.nb.add(self.tab_help, text="Ajuda")
@@ -526,6 +536,9 @@ class ConfigUI(tk.Tk):
 
         # ---- Status / Logs
         self._build_status_tab()
+
+        # ---- Licenciamento (Admin)
+        self._build_licensing_admin_tab()
 
         # ---- Ajuda
         self._build_help_tab()
@@ -3114,6 +3127,7 @@ class ConfigUI(tk.Tk):
             (self.tab_connector, "Fonte de Dados Externa"),
             (self.tab_test_environment, "Ambiente de Testes"),
             (self.tab_status, "Status / Logs"),
+            (self.tab_licensing_admin, "Licenciamento (Admin)"),
         ]
 
         for tab, topic in tab_topics:
@@ -3126,6 +3140,820 @@ class ConfigUI(tk.Tk):
             # Posicionamento independente para não mexer no layout já validado.
             btn.place(relx=1.0, x=-12, y=8, anchor="ne")
             btn.lift()
+
+
+    def _protect_secret_windows(self, value):
+        """Protege um segredo com DPAPI do Windows e retorna Base64."""
+        if not value:
+            return ""
+
+        import base64
+        import ctypes
+        from ctypes import wintypes
+
+        class DATA_BLOB(ctypes.Structure):
+            _fields_ = [
+                ("cbData", wintypes.DWORD),
+                ("pbData", ctypes.POINTER(ctypes.c_byte)),
+            ]
+
+        raw = value.encode("utf-8")
+        raw_buffer = ctypes.create_string_buffer(raw, len(raw))
+        in_blob = DATA_BLOB(
+            len(raw),
+            ctypes.cast(raw_buffer, ctypes.POINTER(ctypes.c_byte)),
+        )
+        out_blob = DATA_BLOB()
+
+        if not ctypes.windll.crypt32.CryptProtectData(
+            ctypes.byref(in_blob),
+            "2A Tecnologia - Gestor de Dados",
+            None,
+            None,
+            None,
+            0,
+            ctypes.byref(out_blob),
+        ):
+            raise ctypes.WinError()
+
+        try:
+            protected = ctypes.string_at(
+                out_blob.pbData,
+                out_blob.cbData,
+            )
+            return base64.b64encode(protected).decode("ascii")
+        finally:
+            ctypes.windll.kernel32.LocalFree(out_blob.pbData)
+
+    def _unprotect_secret_windows(self, protected_b64):
+        """Recupera um segredo protegido por DPAPI do Windows."""
+        if not protected_b64:
+            return ""
+
+        import base64
+        import ctypes
+        from ctypes import wintypes
+
+        class DATA_BLOB(ctypes.Structure):
+            _fields_ = [
+                ("cbData", wintypes.DWORD),
+                ("pbData", ctypes.POINTER(ctypes.c_byte)),
+            ]
+
+        try:
+            protected = base64.b64decode(protected_b64)
+        except Exception:
+            return ""
+
+        protected_buffer = ctypes.create_string_buffer(
+            protected,
+            len(protected),
+        )
+        in_blob = DATA_BLOB(
+            len(protected),
+            ctypes.cast(
+                protected_buffer,
+                ctypes.POINTER(ctypes.c_byte),
+            ),
+        )
+        out_blob = DATA_BLOB()
+
+        if not ctypes.windll.crypt32.CryptUnprotectData(
+            ctypes.byref(in_blob),
+            None,
+            None,
+            None,
+            None,
+            0,
+            ctypes.byref(out_blob),
+        ):
+            return ""
+
+        try:
+            raw = ctypes.string_at(
+                out_blob.pbData,
+                out_blob.cbData,
+            )
+            return raw.decode("utf-8")
+        finally:
+            ctypes.windll.kernel32.LocalFree(out_blob.pbData)
+
+    def _build_licensing_admin_tab(self):
+        """Área protegida para parâmetros do servidor de licenciamento."""
+
+        # A aba cresceu e pode ultrapassar a altura útil em algumas resoluções.
+        # Por isso, somente esta aba usa rolagem vertical, sem alterar as demais.
+        scroll_host = ttk.Frame(self.tab_licensing_admin)
+        scroll_host.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(
+            scroll_host,
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        vscroll = ttk.Scrollbar(
+            scroll_host,
+            orient="vertical",
+            command=canvas.yview,
+        )
+        canvas.configure(yscrollcommand=vscroll.set)
+
+        vscroll.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        outer = ttk.Frame(canvas)
+        canvas_window = canvas.create_window(
+            (0, 0),
+            window=outer,
+            anchor="nw",
+        )
+
+        def _lic_admin_update_scrollregion(event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _lic_admin_fit_width(event):
+            canvas.itemconfigure(
+                canvas_window,
+                width=event.width,
+            )
+
+        outer.bind(
+            "<Configure>",
+            _lic_admin_update_scrollregion,
+        )
+        canvas.bind(
+            "<Configure>",
+            _lic_admin_fit_width,
+        )
+
+        # Mouse wheel funciona somente quando o cursor está nesta aba.
+        def _lic_admin_mousewheel(event):
+            canvas.yview_scroll(
+                int(-1 * (event.delta / 120)),
+                "units",
+            )
+
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _lic_admin_mousewheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+
+        content = ttk.Frame(outer)
+        content.pack(fill="both", expand=True, padx=12, pady=12)
+
+        self.lic_admin_unlocked = False
+        self.lic_admin_body = ttk.Frame(content)
+
+        self.lic_admin_lock = ttk.LabelFrame(
+            content,
+            text="Área protegida",
+        )
+        self.lic_admin_lock.pack(fill="x", pady=(0, 10))
+
+        ttk.Label(
+            self.lic_admin_lock,
+            text=(
+                "Esta área contém configurações administrativas do licenciamento. "
+                "O acesso exige a senha administrativa."
+            ),
+            wraplength=760,
+            justify="left",
+        ).pack(anchor="w", padx=10, pady=(10, 8))
+
+        ttk.Button(
+            self.lic_admin_lock,
+            text="Desbloquear Configuração",
+            command=self._unlock_licensing_admin,
+        ).pack(anchor="w", padx=10, pady=(0, 10))
+
+        # Variáveis dos parâmetros NÃO sensíveis.
+        self.lic_ftp_host = tk.StringVar(
+            value=self.cfg.get("licensing", "ftp_host", fallback="ftp.2atec.com.br").strip()
+        )
+        self.lic_ftp_port = tk.StringVar(
+            value=self.cfg.get("licensing", "ftp_port", fallback="21").strip()
+        )
+        self.lic_ftp_user = tk.StringVar(
+            value=self.cfg.get("licensing", "ftp_user", fallback="u300658511").strip()
+        )
+        self.lic_ftp_base_path = tk.StringVar(
+            value=self.cfg.get("licensing", "ftp_base_path", fallback="/public_html/activate").strip()
+        )
+
+        # Migração da configuração administrativa.
+        # A partir da versão 3, o SQL de licenciamento usa a instância
+        # WIN-4LDPKMOC3M6\SQLEXPRESS e porta vazia.
+        lic_cfg_version = int(
+            self.cfg.get(
+                "licensing",
+                "config_version",
+                fallback="1",
+            )
+            or "1"
+        )
+
+        if lic_cfg_version < 3:
+            default_sql_server = r"WIN-4LDPKMOC3M6\SQLEXPRESS"
+            default_sql_port = ""
+            default_sql_database = "Suporte"
+            default_sql_user = "logconf"
+        else:
+            default_sql_server = self.cfg.get(
+                "licensing",
+                "sql_server",
+                fallback=r"WIN-4LDPKMOC3M6\SQLEXPRESS",
+            ).strip()
+            default_sql_port = self.cfg.get(
+                "licensing",
+                "sql_port",
+                fallback="",
+            ).strip()
+            default_sql_database = self.cfg.get(
+                "licensing",
+                "sql_database",
+                fallback="Suporte",
+            ).strip()
+            default_sql_user = self.cfg.get(
+                "licensing",
+                "sql_user",
+                fallback="logconf",
+            ).strip()
+
+        self.lic_sql_driver = tk.StringVar(
+            value=self.cfg.get(
+                "licensing",
+                "sql_driver",
+                fallback="ODBC Driver 17 for SQL Server",
+            ).strip()
+        )
+
+        self.lic_sql_server = tk.StringVar(
+            value=default_sql_server
+        )
+        self.lic_sql_port = tk.StringVar(
+            value=default_sql_port
+        )
+        self.lic_sql_license_database = tk.StringVar(
+            value=self.cfg.get("licensing", "sql_license_database", fallback="demonstracao").strip()
+        )
+        self.lic_sql_support_database = tk.StringVar(
+            value=self.cfg.get("licensing", "sql_support_database", fallback="Suporte").strip()
+        )
+        self.lic_sql_user = tk.StringVar(
+            value=default_sql_user
+        )
+        self.lic_sql_license_table = tk.StringVar(
+            value=self.cfg.get(
+                "licensing",
+                "sql_license_table",
+                fallback="dbo.Demonstracao",
+            ).strip()
+        )
+        self.lic_sql_support_table = tk.StringVar(
+            value=self.cfg.get(
+                "licensing",
+                "sql_support_table",
+                fallback="dbo.ExpSuporte",
+            ).strip()
+        )
+
+        # Senhas persistidas com DPAPI: nunca em texto aberto no config.ini.
+        self.lic_ftp_password = tk.StringVar(
+            value=self._unprotect_secret_windows(
+                self.cfg.get(
+                    "licensing",
+                    "ftp_password_dpapi",
+                    fallback="",
+                )
+            )
+        )
+        saved_sql_secret = self._unprotect_secret_windows(
+            self.cfg.get(
+                "licensing",
+                "sql_password_dpapi",
+                fallback="",
+            )
+        )
+        if not saved_sql_secret:
+            # Migração segura: reutiliza apenas em memória a senha já existente
+            # na seção [sql]. Ao clicar Salvar Configuração, ela passa a ficar
+            # protegida por DPAPI na seção [licensing].
+            saved_sql_secret = self.cfg.get(
+                "sql",
+                "password",
+                fallback="",
+            )
+
+        self.lic_sql_password = tk.StringVar(
+            value=saved_sql_secret
+        )
+        self.lic_ftp_test_status = tk.StringVar(value="Não testado")
+        self.lic_sql_test_status = tk.StringVar(value="Não testado")
+
+        ftp = ttk.LabelFrame(self.lic_admin_body, text="Servidor FTP de Licenciamento")
+        ftp.pack(fill="x", pady=(0, 10))
+        ftp.columnconfigure(1, weight=1)
+
+        self._lic_admin_field(ftp, "Servidor", self.lic_ftp_host, 0)
+        self._lic_admin_field(ftp, "Porta", self.lic_ftp_port, 1, width=12)
+        self._lic_admin_field(ftp, "Usuário", self.lic_ftp_user, 2)
+        self._lic_admin_field(ftp, "Senha", self.lic_ftp_password, 3, show="*")
+        self._lic_admin_field(ftp, "Pasta base", self.lic_ftp_base_path, 4)
+        ftp_actions = ttk.Frame(ftp)
+        ftp_actions.grid(row=5, column=0, columnspan=2, sticky="w", padx=10, pady=(8, 10))
+        ttk.Button(
+            ftp_actions,
+            text="Testar FTP",
+            command=self._test_licensing_ftp,
+        ).pack(side="left")
+        ttk.Label(
+            ftp_actions,
+            textvariable=self.lic_ftp_test_status,
+        ).pack(side="left", padx=(10, 0))
+
+        sql = ttk.LabelFrame(
+            self.lic_admin_body,
+            text="SQL Server - Licenciamento e Suporte",
+        )
+        sql.pack(fill="x", pady=(0, 10))
+        sql.columnconfigure(1, weight=1)
+
+        ttk.Label(sql, text="Driver ODBC").grid(
+            row=0, column=0, sticky="w", padx=10, pady=5
+        )
+        installed_sql_drivers = [
+            d for d in pyodbc.drivers()
+            if "SQL Server" in d
+        ]
+        self.lic_sql_driver_combo = ttk.Combobox(
+            sql,
+            textvariable=self.lic_sql_driver,
+            values=installed_sql_drivers,
+            width=45,
+            state="readonly",
+        )
+        self.lic_sql_driver_combo.grid(
+            row=0, column=1, sticky="w", padx=(0, 10), pady=5
+        )
+
+        self._lic_admin_field(sql, "Servidor", self.lic_sql_server, 1)
+        self._lic_admin_field(sql, "Porta", self.lic_sql_port, 2, width=12)
+        self._lic_admin_field(sql, "Usuário", self.lic_sql_user, 3)
+        self._lic_admin_field(sql, "Senha", self.lic_sql_password, 4, show="*")
+
+        self._lic_admin_field(
+            sql,
+            "Banco da Licença",
+            self.lic_sql_license_database,
+            5,
+        )
+        self._lic_admin_field(
+            sql,
+            "Tabela de Licença",
+            self.lic_sql_license_table,
+            6,
+        )
+
+        self._lic_admin_field(
+            sql,
+            "Banco do Suporte",
+            self.lic_sql_support_database,
+            7,
+        )
+        self._lic_admin_field(
+            sql,
+            "Tabela de Suporte",
+            self.lic_sql_support_table,
+            8,
+        )
+
+        sql_actions = ttk.Frame(sql)
+        sql_actions.grid(
+            row=9,
+            column=0,
+            columnspan=2,
+            sticky="w",
+            padx=10,
+            pady=(8, 10),
+        )
+        ttk.Button(
+            sql_actions,
+            text="Testar SQL",
+            command=self._test_licensing_sql,
+        ).pack(side="left")
+        ttk.Label(
+            sql_actions,
+            textvariable=self.lic_sql_test_status,
+        ).pack(side="left", padx=(10, 0))
+
+        note = ttk.LabelFrame(self.lic_admin_body, text="Segurança")
+        note.pack(fill="x", pady=(0, 10))
+        ttk.Label(
+            note,
+            text=(
+                "Servidor, porta, usuário, caminhos, banco e tabelas são salvos na configuração. "
+                "As senhas são protegidas pelo Windows (DPAPI) e nunca ficam em texto aberto. "
+                "O caminho da licença usa a pasta base e a identificação da máquina."
+            ),
+            wraplength=760,
+            justify="left",
+        ).pack(anchor="w", padx=10, pady=10)
+
+        actions = ttk.Frame(self.lic_admin_body)
+        actions.pack(fill="x")
+        ttk.Button(
+            actions,
+            text="Salvar Configuração",
+            command=self._save_licensing_admin_settings,
+        ).pack(side="left")
+        ttk.Button(
+            actions,
+            text="Bloquear",
+            command=self._lock_licensing_admin,
+        ).pack(side="left", padx=(8, 0))
+
+    def _lic_admin_field(self, parent, label, variable, row, width=48, show=None):
+        ttk.Label(parent, text=label).grid(
+            row=row, column=0, sticky="w", padx=10, pady=5
+        )
+        ttk.Entry(
+            parent,
+            textvariable=variable,
+            width=width,
+            show=show,
+        ).grid(
+            row=row, column=1, sticky="w", padx=(0, 10), pady=5
+        )
+
+    def _admin_password_hash(self, password, salt_hex):
+        import hashlib
+        salt = bytes.fromhex(salt_hex)
+        return hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt,
+            200000,
+        ).hex()
+
+    def _unlock_licensing_admin(self):
+        """
+        No primeiro acesso, permite criar a senha administrativa.
+        Depois, somente essa senha desbloqueia a área.
+        A senha não é salva; apenas salt + hash ficam no config.ini.
+        """
+        import os as _os
+        from tkinter import simpledialog
+
+        cfg = load_cfg()
+        if not cfg.has_section("licensing_admin"):
+            cfg.add_section("licensing_admin")
+
+        salt_hex = cfg.get("licensing_admin", "salt", fallback="").strip()
+        saved_hash = cfg.get("licensing_admin", "password_hash", fallback="").strip()
+
+        if not salt_hex or not saved_hash:
+            p1 = simpledialog.askstring(
+                "Criar Senha Administrativa",
+                "Primeiro acesso.\n\nCrie a senha exclusiva da área de licenciamento:",
+                show="*",
+                parent=self,
+            )
+            if not p1:
+                return
+            p2 = simpledialog.askstring(
+                "Confirmar Senha",
+                "Digite novamente a senha administrativa:",
+                show="*",
+                parent=self,
+            )
+            if p1 != p2:
+                messagebox.showerror(
+                    "Senha Administrativa",
+                    "As senhas não conferem.",
+                    parent=self,
+                )
+                return
+
+            salt_hex = _os.urandom(16).hex()
+            saved_hash = self._admin_password_hash(p1, salt_hex)
+            cfg.set("licensing_admin", "salt", salt_hex)
+            cfg.set("licensing_admin", "password_hash", saved_hash)
+            save_cfg(cfg)
+            self.cfg = cfg
+        else:
+            password = simpledialog.askstring(
+                "Licenciamento (Admin)",
+                "Digite a senha administrativa:",
+                show="*",
+                parent=self,
+            )
+            if password is None:
+                return
+
+            informed = self._admin_password_hash(password, salt_hex)
+            import hmac
+            if not hmac.compare_digest(informed, saved_hash):
+                messagebox.showerror(
+                    "Acesso negado",
+                    "Senha administrativa inválida.",
+                    parent=self,
+                )
+                return
+
+        self.lic_admin_unlocked = True
+        self.lic_admin_lock.pack_forget()
+        self.lic_admin_body.pack(fill="both", expand=True)
+
+    def _lock_licensing_admin(self):
+        self.lic_admin_unlocked = False
+        self.lic_admin_body.pack_forget()
+        self.lic_admin_lock.pack(fill="x", pady=(0, 10))
+
+
+    def _test_licensing_ftp(self):
+        """Testa somente conexão e acesso à pasta-base do FTP."""
+        host = self.lic_ftp_host.get().strip()
+        user = self.lic_ftp_user.get().strip()
+        password = self.lic_ftp_password.get()
+        base_path = self.lic_ftp_base_path.get().strip() or "/"
+        try:
+            port = int(self.lic_ftp_port.get().strip() or "21")
+        except Exception:
+            messagebox.showerror(
+                "Testar FTP",
+                "Porta FTP inválida.",
+                parent=self,
+            )
+            return
+
+        if not host or not user or not password:
+            messagebox.showwarning(
+                "Testar FTP",
+                "Informe servidor, usuário e senha antes de testar.",
+                parent=self,
+            )
+            return
+
+        self.lic_ftp_test_status.set("Testando...")
+        self.update_idletasks()
+
+        ftp = None
+        try:
+            from ftplib import FTP
+
+            ftp = FTP()
+            ftp.connect(host=host, port=port, timeout=10)
+            ftp.login(user=user, passwd=password)
+            ftp.set_pasv(True)
+
+            if base_path:
+                ftp.cwd(base_path)
+
+            current_dir = ftp.pwd()
+            self.lic_ftp_test_status.set("Conectado")
+            messagebox.showinfo(
+                "Testar FTP",
+                "Conexão FTP realizada com sucesso.\n\n"
+                f"Pasta acessada: {current_dir}",
+                parent=self,
+            )
+        except Exception as exc:
+            self.lic_ftp_test_status.set("Falha")
+            messagebox.showerror(
+                "Testar FTP",
+                "Não foi possível conectar/acessar o FTP.\n\n"
+                f"Detalhe: {exc}",
+                parent=self,
+            )
+        finally:
+            if ftp is not None:
+                try:
+                    ftp.quit()
+                except Exception:
+                    try:
+                        ftp.close()
+                    except Exception:
+                        pass
+
+    def _test_licensing_sql(self):
+        """Testa o SQL central nos bancos de licença e suporte."""
+        driver = self.lic_sql_driver.get().strip()
+        server = self.lic_sql_server.get().strip()
+        port = self.lic_sql_port.get().strip()
+        user = self.lic_sql_user.get().strip()
+        password = self.lic_sql_password.get()
+
+        license_database = (
+            self.lic_sql_license_database.get().strip()
+            or "demonstracao"
+        )
+        support_database = (
+            self.lic_sql_support_database.get().strip()
+            or "Suporte"
+        )
+
+        license_table = (
+            self.lic_sql_license_table.get().strip()
+            or "dbo.Demonstracao"
+        )
+        support_table = (
+            self.lic_sql_support_table.get().strip()
+            or "dbo.ExpSuporte"
+        )
+
+        if not driver or not server or not user or not password:
+            messagebox.showwarning(
+                "Testar SQL",
+                "Informe Driver ODBC, servidor, usuário e senha antes de testar.",
+                parent=self,
+            )
+            return
+
+        self.lic_sql_test_status.set("Testando...")
+        self.update_idletasks()
+
+        installed = pyodbc.drivers()
+        if driver not in installed:
+            self.lic_sql_test_status.set("Falha")
+            messagebox.showerror(
+                "Testar SQL",
+                f"Driver ODBC não instalado nesta máquina:\n{driver}",
+                parent=self,
+            )
+            return
+
+        server_value = server
+        if (
+            port
+            and "," not in server_value
+            and "\\" not in server_value
+        ):
+            server_value = f"{server_value},{port}"
+
+        def safe_table_name(value):
+            cleaned = (
+                value.replace("[", "")
+                .replace("]", "")
+                .strip()
+            )
+            if "." not in cleaned:
+                cleaned = "dbo." + cleaned
+
+            parts = cleaned.split(".")
+            if (
+                len(parts) != 2
+                or not all(
+                    part.replace("_", "").isalnum()
+                    for part in parts
+                )
+            ):
+                raise RuntimeError(
+                    f"Nome de tabela inválido: {value}"
+                )
+            return cleaned
+
+        safe_license = safe_table_name(license_table)
+        safe_support = safe_table_name(support_table)
+
+        def test_database(database, table):
+            conn = None
+            try:
+                conn_str = (
+                    f"DRIVER={{{driver}}};"
+                    f"SERVER={server_value};"
+                    f"DATABASE={database};"
+                    f"UID={user};"
+                    f"PWD={password};"
+                    "TrustServerCertificate=yes;"
+                )
+
+                conn = pyodbc.connect(
+                    conn_str,
+                    timeout=8,
+                )
+
+                cur = conn.cursor()
+                cur.execute(
+                    f"SELECT TOP 1 * FROM {table}"
+                )
+                cur.fetchone()
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+        try:
+            # Valida primeiro o banco/tabela da licença.
+            test_database(
+                license_database,
+                safe_license,
+            )
+
+            # Depois valida o banco/tabela do suporte.
+            test_database(
+                support_database,
+                safe_support,
+            )
+
+            self.lic_sql_test_status.set("Conectado")
+            messagebox.showinfo(
+                "Testar SQL",
+                "Conexão SQL realizada com sucesso.\n\n"
+                f"Licença: {license_database}.{safe_license}\n"
+                f"Suporte: {support_database}.{safe_support}",
+                parent=self,
+            )
+
+        except Exception as exc:
+            self.lic_sql_test_status.set("Falha")
+            messagebox.showerror(
+                "Testar SQL",
+                "Não foi possível conectar ou consultar o SQL de licenciamento.\n\n"
+                f"Detalhe: {exc}",
+                parent=self,
+            )
+
+    def _save_licensing_admin_settings(self):
+        if not self.lic_admin_unlocked:
+            return
+
+        cfg = load_cfg()
+        if not cfg.has_section("licensing"):
+            cfg.add_section("licensing")
+
+        values = {
+            "config_version": "3",
+            "ftp_host": self.lic_ftp_host.get().strip(),
+            "ftp_port": self.lic_ftp_port.get().strip() or "21",
+            "ftp_user": self.lic_ftp_user.get().strip(),
+            "ftp_base_path": (
+                self.lic_ftp_base_path.get().strip()
+                or "/public_html/activate"
+            ),
+            "sql_driver": self.lic_sql_driver.get().strip(),
+            "sql_server": self.lic_sql_server.get().strip(),
+            "sql_port": self.lic_sql_port.get().strip(),
+            "sql_license_database": (
+                self.lic_sql_license_database.get().strip()
+                or "demonstracao"
+            ),
+            "sql_support_database": (
+                self.lic_sql_support_database.get().strip()
+                or "Suporte"
+            ),
+            "sql_user": self.lic_sql_user.get().strip(),
+            "sql_license_table": (
+                self.lic_sql_license_table.get().strip()
+                or "dbo.Demonstracao"
+            ),
+            "sql_support_table": (
+                self.lic_sql_support_table.get().strip()
+                or "dbo.ExpSuporte"
+            ),
+        }
+
+        for key, value in values.items():
+            cfg.set("licensing", key, value)
+
+        cfg.set(
+            "licensing",
+            "ftp_password_dpapi",
+            self._protect_secret_windows(
+                self.lic_ftp_password.get()
+            ),
+        )
+        cfg.set(
+            "licensing",
+            "sql_password_dpapi",
+            self._protect_secret_windows(
+                self.lic_sql_password.get()
+            ),
+        )
+
+        # Remove qualquer chave antiga/insegura.
+        for old_key in (
+            "ftp_password",
+            "sql_password",
+            "sql_trusted_connection",
+            "sql_driver",
+            "sql_database",
+            "sql_table",
+            "license_filename",
+        ):
+            if cfg.has_option("licensing", old_key):
+                cfg.remove_option("licensing", old_key)
+
+        save_cfg(cfg)
+        self.cfg = cfg
+
+        messagebox.showinfo(
+            "Licenciamento (Admin)",
+            "Configuração salva com sucesso.\n\n"
+            "FTP e SQL serão restaurados exatamente como foram salvos na próxima abertura.\n"
+            "As senhas foram protegidas pelo Windows.",
+            parent=self,
+        )
+
 
     def _build_help_tab(self):
         """Ajuda local e objetiva sobre cada área do Gestor de Dados."""
@@ -3228,6 +4056,16 @@ class ConfigUI(tk.Tk):
                 "NF-e já importada não é lançada novamente. Produto existente recebe acréscimo no saldo; "
                 "produto novo é cadastrado automaticamente."
             ),
+            "Licenciamento (Admin)": (
+                "LICENCIAMENTO (ADMIN)\n\n"
+                "Área protegida para configurar o servidor FTP onde ficam os arquivos .lic "
+                "e o SQL Server utilizado para controle central de licença e suporte.\n\n"
+                "No primeiro acesso é criada uma senha administrativa exclusiva. "
+                "Nas próximas vezes, essa senha será exigida para desbloquear a área.\n\n"
+                "As senhas de FTP e SQL não são gravadas em texto aberto no config.ini.\n\n"
+                "Use Testar FTP para validar o acesso ao servidor e à pasta-base. "
+                "Use Testar SQL para validar o banco da licença (demonstracao/dbo.Demonstracao) e o banco do suporte (Suporte/dbo.ExpSuporte)."
+            ),
             "Status / Logs": (
                 "STATUS / LOGS\n\n"
                 "Mostra o estado atual da aplicação e os registros gerados durante a operação.\n\n"
@@ -3324,6 +4162,7 @@ class ConfigUI(tk.Tk):
             str(self.tab_connector): "Fonte de Dados Externa",
             str(self.tab_test_environment): "Ambiente de Testes",
             str(self.tab_status): "Status / Logs",
+            str(self.tab_licensing_admin): "Licenciamento (Admin)",
         }
 
         # Demais abas são identificadas pelo texto da própria guia.
@@ -3393,7 +4232,7 @@ class ConfigUI(tk.Tk):
             license_box,
             textvariable=self.support_code_var,
             state="readonly",
-            width=42,
+            width=28,
         )
         support_entry.grid(
             row=0, column=1, sticky="ew", padx=(0, 5), pady=(10, 5)
@@ -3443,20 +4282,14 @@ class ConfigUI(tk.Tk):
         ttk.Button(
             buttons,
             text="Ativar Licença",
-            command=self._license_activation_placeholder,
+            command=self._activate_license_test,
         ).pack(side="left")
-
-        ttk.Button(
-            buttons,
-            text="Enviar Código de Suporte",
-            command=self._send_support_code_placeholder,
-        ).pack(side="left", padx=(8, 0))
 
         ttk.Label(
             license_box,
             text=(
-                "A ativação e o envio do Código de Suporte serão configurados "
-                "nas próximas etapas do licenciamento."
+                "A ativação da licença será configurada nas próximas etapas. "
+                "Use o botão Copiar para enviar o Código de Suporte pelo canal desejado."
             ),
             wraplength=700,
         ).grid(
@@ -3617,22 +4450,297 @@ class ConfigUI(tk.Tk):
         finally:
             self.support_code_menu.grab_release()
 
-    def _license_activation_placeholder(self):
-        messagebox.showinfo(
-            "Ativar Licença",
-            "A tela de licenciamento está preparada.\n\n"
-            "A regra de ativação será implementada na próxima etapa.",
-            parent=self,
+
+    def _parse_kalipso_symmetric_license(self, raw_bytes):
+        """
+        Formato definitivo gerado pelo Kalipso Encrypt Symmetric:
+        - Data Type: Text UTF-16 LE
+        - Result Encoding: None (Binary)
+        - AES CBC PKCS5 Padding
+        - 128 bit key
+        - IV Provided
+        - Append Result to IV = Yes
+
+        O arquivo é gravado como UTF-16 LE. Os 16 primeiros caracteres
+        representam o IV anexado; os caracteres seguintes representam,
+        byte a byte, o ciphertext AES.
+        """
+        try:
+            content = raw_bytes.decode("utf-16")
+        except Exception:
+            content = raw_bytes.decode("utf-16-le")
+
+        content = content.lstrip("\ufeff")
+
+        if len(content) < 32:
+            raise RuntimeError(
+                "Arquivo .lic incompatível com o novo formato de licença."
+            )
+
+        iv_text = content[:16]
+        cipher_text = content[16:]
+
+        try:
+            iv = bytes(ord(ch) for ch in iv_text)
+            cipher = bytes(ord(ch) for ch in cipher_text)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Não foi possível interpretar o conteúdo binário da licença: {exc}"
+            )
+
+        if len(iv) != 16:
+            raise RuntimeError("IV inválido no arquivo .lic.")
+
+        if not cipher or len(cipher) % 16 != 0:
+            raise RuntimeError(
+                "Ciphertext inválido: o tamanho não é múltiplo de 16 bytes."
+            )
+
+        return iv, cipher
+
+
+    def _decrypt_kalipso_license_windows(self, iv, cipher, support_code):
+        """
+        Decrypt definitivo compatível com o License13.lic:
+        AES-128 CBC + PKCS5/PKCS7, texto original UTF-16 LE.
+
+        O PowerShell devolve os bytes descriptografados em Base64 para evitar
+        qualquer alteração de encoding na passagem PowerShell -> Python.
+        """
+        import base64
+        import json
+        import subprocess
+
+        license_key = "2ATecLic2026Key!"
+
+        payload = {
+            "iv": base64.b64encode(iv).decode("ascii"),
+            "cipher": base64.b64encode(cipher).decode("ascii"),
+            "key": license_key,
+        }
+
+        ps = r"""
+$ErrorActionPreference = "Stop"
+$payload = ConvertFrom-Json '__PAYLOAD__'
+
+[byte[]]$iv = [Convert]::FromBase64String([string]$payload.iv)
+[byte[]]$cipher = [Convert]::FromBase64String([string]$payload.cipher)
+[byte[]]$key = [Text.Encoding]::UTF8.GetBytes([string]$payload.key)
+
+$aes = [System.Security.Cryptography.Aes]::Create()
+$aes.KeySize = 128
+$aes.BlockSize = 128
+$aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
+$aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+$aes.Key = $key
+$aes.IV = $iv
+
+$decryptor = $aes.CreateDecryptor()
+
+try {
+    [byte[]]$plain = $decryptor.TransformFinalBlock(
+        $cipher, 0, $cipher.Length
+    )
+
+    # Retorna bytes, e não texto, para não sofrer conversão de encoding.
+    Write-Output ([Convert]::ToBase64String($plain))
+}
+finally {
+    $decryptor.Dispose()
+    $aes.Dispose()
+}
+"""
+
+        ps = ps.replace(
+            "__PAYLOAD__",
+            json.dumps(payload).replace("'", "''"),
         )
 
-    def _send_support_code_placeholder(self):
-        messagebox.showinfo(
-            "Enviar Código de Suporte",
-            "Código de Suporte desta máquina:\n\n"
-            f"{self.support_code_var.get()}\n\n"
-            "O envio será configurado em uma próxima etapa.",
-            parent=self,
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "-",
+            ],
+            input=ps,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            creationflags=getattr(
+                subprocess,
+                "CREATE_NO_WINDOW",
+                0,
+            ),
         )
+
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            raise RuntimeError(
+                f"Falha no Decrypt AES da licença: {detail}"
+            )
+
+        encoded_plain = (result.stdout or "").strip()
+
+        try:
+            plain_bytes = base64.b64decode(encoded_plain)
+            plain = plain_bytes.decode("utf-16-le")
+        except Exception as exc:
+            raise RuntimeError(
+                f"Decrypt executado, mas não foi possível interpretar o texto: {exc}"
+            )
+
+        plain = plain.lstrip("\ufeff").rstrip("\x00").strip()
+
+        if plain == support_code:
+            return plain, "AES-128-CBC"
+
+        # Diagnóstico seguro: não mostra chave; mostra apenas o resultado
+        # recuperado e o código esperado para identificar diferenças.
+        return plain, (
+            "SUPPORT_CODE_DIFERENTE | "
+            f"Esperado={support_code!r} | "
+            f"Obtido={plain!r} | "
+            f"Tamanhos={len(support_code)}/{len(plain)}"
+        )
+
+
+    def _activate_license_test(self):
+        from ftplib import FTP
+        import os
+        import posixpath
+
+        support_code = self.support_code_var.get().strip()
+
+        if not support_code:
+            messagebox.showerror(
+                "Ativar Licença",
+                "Código de Suporte não disponível.",
+                parent=self,
+            )
+            return
+
+        prefix = support_code[:9]
+        host = self.lic_ftp_host.get().strip()
+        user = self.lic_ftp_user.get().strip()
+        password = self.lic_ftp_password.get()
+        base_path = self.lic_ftp_base_path.get().strip() or "/public_html/activate"
+
+        try:
+            port = int(self.lic_ftp_port.get().strip() or "21")
+        except Exception:
+            messagebox.showerror(
+                "Ativar Licença",
+                "Porta FTP inválida.",
+                parent=self,
+            )
+            return
+
+        if not host or not user or not password:
+            messagebox.showwarning(
+                "Ativar Licença",
+                "Credenciais FTP incompletas. Confira Licenciamento (Admin).",
+                parent=self,
+            )
+            return
+
+        ftp = None
+
+        try:
+            self.license_status_var.set("Verificando licença...")
+            self.update_idletasks()
+
+            ftp = FTP()
+            ftp.connect(host=host, port=port, timeout=12)
+            ftp.login(user=user, passwd=password)
+            ftp.set_pasv(True)
+
+            remote_dir = posixpath.join(base_path.rstrip("/"), prefix)
+            ftp.cwd(remote_dir)
+
+            lic_names = sorted({
+                os.path.basename(name)
+                for name in ftp.nlst()
+                if os.path.basename(name).lower().endswith(".lic")
+            })
+
+            if not lic_names:
+                self.license_status_var.set("Não ativada")
+                messagebox.showwarning(
+                    "Ativar Licença",
+                    "Nenhum arquivo .lic foi encontrado para esta máquina.",
+                    parent=self,
+                )
+                return
+
+            last_detail = ""
+
+            for remote_name in lic_names:
+                chunks = []
+                ftp.retrbinary(f"RETR {remote_name}", chunks.append)
+                raw_file = b"".join(chunks)
+
+                local_path = os.path.join(BASE_DIR, remote_name)
+                with open(local_path, "wb") as f:
+                    f.write(raw_file)
+
+                try:
+                    iv, cipher = self._parse_kalipso_symmetric_license(
+                        raw_file
+                    )
+                    plain, method = self._decrypt_kalipso_license_windows(
+                        iv,
+                        cipher,
+                        support_code,
+                    )
+
+                    if plain == support_code:
+                        self.license_status_var.set("Licenciada")
+                        messagebox.showinfo(
+                            "Ativar Licença",
+                            "Licença ativada com sucesso.\n\n"
+                            "O conteúdo descriptografado corresponde ao Código de Suporte "
+                            "desta máquina.\n\n"
+                            f"Arquivo: {remote_name}\n"
+                            f"Método: {method}",
+                            parent=self,
+                        )
+                        return
+
+                    last_detail = method or "Decrypt não retornou o Código de Suporte."
+
+                except Exception as exc:
+                    last_detail = str(exc)
+
+            self.license_status_var.set("Licença inválida")
+            messagebox.showwarning(
+                "Ativar Licença",
+                "O arquivo .lic foi encontrado e baixado, mas o conteúdo "
+                "descriptografado não corresponde ao Código de Suporte desta máquina.\n\n"
+                f"Detalhe: {last_detail}",
+                parent=self,
+            )
+
+        except Exception as exc:
+            self.license_status_var.set("Não ativada")
+            messagebox.showerror(
+                "Ativar Licença",
+                "Não foi possível concluir a ativação.\n\n"
+                f"Detalhe: {exc}",
+                parent=self,
+            )
+        finally:
+            if ftp is not None:
+                try:
+                    ftp.quit()
+                except Exception:
+                    try:
+                        ftp.close()
+                    except Exception:
+                        pass
+
 
     def _on_main_tab_changed(self, event=None):
         """Maximiza somente a aba Ambiente de Testes e restaura nas demais."""
@@ -3643,7 +4751,13 @@ class ConfigUI(tk.Tk):
                 # Consulta a conexão de verdade ao entrar na aba.
                 self.after(100, self._refresh_external_connection_status_silent)
 
-            if current == str(self.tab_test_environment):
+            # As abas com maior quantidade de informação usam tela maximizada.
+            maximize_tabs = {
+                str(self.tab_test_environment),
+                str(self.tab_licensing_admin),
+            }
+
+            if current in maximize_tabs:
                 if not self._test_env_maximized:
                     self._normal_geometry = self.geometry()
                     try:
