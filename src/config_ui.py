@@ -28,6 +28,7 @@ BUILD_DATE = "28/08/2026 20:30"
 
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
 EXAMPLE_PATH = os.path.join(BASE_DIR, "config.ini.example")
+LICENCI_PATH = os.path.join(BASE_DIR, "licenci.ini")
 
 
 def resource_path(relative_path: str) -> str:
@@ -94,8 +95,59 @@ def build_conn_str(cfg: configparser.ConfigParser) -> str:
     )
 
 
+def _acquire_config_single_instance():
+    """
+    Garante apenas uma janela do Config por sessão do Windows.
+    Retorna o handle do mutex na primeira instância.
+    Se já existir outra instância, informa o usuário e encerra a segunda.
+    """
+    if os.name != "nt":
+        return None
+
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        user32 = ctypes.windll.user32
+
+        # Local\\ evita problemas de permissão e é suficiente para impedir
+        # duplicação da janela na sessão do usuário.
+        mutex_name = "Local\\2ATecnologia_ImportFilesLogConf_Config"
+
+        kernel32.SetLastError(0)
+        handle = kernel32.CreateMutexW(
+            None,
+            False,
+            mutex_name,
+        )
+
+        ERROR_ALREADY_EXISTS = 183
+        if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+            if handle:
+                kernel32.CloseHandle(handle)
+
+            user32.MessageBoxW(
+                None,
+                "A Configuração já está aberta.",
+                "Gestor de Dados - 2A Tecnologia",
+                0x00000040,  # MB_ICONINFORMATION
+            )
+            raise SystemExit(0)
+
+        return handle
+
+    except SystemExit:
+        raise
+    except Exception:
+        # Se o Windows não permitir criar o mutex por alguma razão,
+        # não bloqueia a abertura normal do Config.
+        return None
+
+
+
 class ConfigUI(tk.Tk):
     def __init__(self, initial_tab="config"):
+        self._config_single_instance_mutex = _acquire_config_single_instance()
         super().__init__()
         self.title("Gestor de Dados - 2A Tecnologia")
         try:
@@ -144,6 +196,7 @@ class ConfigUI(tk.Tk):
         self._load_to_form()
         self._apply_states()
         self._select_initial_tab()
+        self.after(150, self._apply_license_ui_mode)
 
         # Restaura automaticamente o monitor de NF-e caso ele tenha sido
         # deixado em PLAY na última execução.
@@ -3445,8 +3498,20 @@ class ConfigUI(tk.Tk):
         self.lic_sql_password = tk.StringVar(
             value=saved_sql_secret
         )
-        self.lic_ftp_test_status = tk.StringVar(value="Não testado")
-        self.lic_sql_test_status = tk.StringVar(value="Não testado")
+        self.lic_ftp_test_status = tk.StringVar(
+            value=self.cfg.get(
+                "licensing",
+                "ftp_last_status",
+                fallback="Não testado",
+            )
+        )
+        self.lic_sql_test_status = tk.StringVar(
+            value=self.cfg.get(
+                "licensing",
+                "sql_last_status",
+                fallback="Não testado",
+            )
+        )
 
         ftp = ttk.LabelFrame(self.lic_admin_body, text="Servidor FTP de Licenciamento")
         ftp.pack(fill="x", pady=(0, 10))
@@ -3551,7 +3616,7 @@ class ConfigUI(tk.Tk):
             text=(
                 "Servidor, porta, usuário, caminhos, banco e tabelas são salvos na configuração. "
                 "As senhas são protegidas pelo Windows (DPAPI) e nunca ficam em texto aberto. "
-                "O caminho da licença usa a pasta base e a identificação da máquina."
+                "O caminho da licença usa: pasta base / 9 primeiros caracteres / licence12.lic."
             ),
             wraplength=760,
             justify="left",
@@ -3668,6 +3733,18 @@ class ConfigUI(tk.Tk):
         self.lic_admin_lock.pack(fill="x", pady=(0, 10))
 
 
+    def _save_licensing_last_status(self, key, value):
+        """Persiste o último resultado conhecido de FTP/SQL da área Admin."""
+        try:
+            cfg = load_cfg()
+            if not cfg.has_section("licensing"):
+                cfg.add_section("licensing")
+            cfg.set("licensing", key, value)
+            save_cfg(cfg)
+            self.cfg = cfg
+        except Exception:
+            pass
+
     def _test_licensing_ftp(self):
         """Testa somente conexão e acesso à pasta-base do FTP."""
         host = self.lic_ftp_host.get().strip()
@@ -3709,6 +3786,7 @@ class ConfigUI(tk.Tk):
 
             current_dir = ftp.pwd()
             self.lic_ftp_test_status.set("Conectado")
+            self._save_licensing_last_status("ftp_last_status", "Conectado")
             messagebox.showinfo(
                 "Testar FTP",
                 "Conexão FTP realizada com sucesso.\n\n"
@@ -3717,6 +3795,7 @@ class ConfigUI(tk.Tk):
             )
         except Exception as exc:
             self.lic_ftp_test_status.set("Falha")
+            self._save_licensing_last_status("ftp_last_status", "Falha")
             messagebox.showerror(
                 "Testar FTP",
                 "Não foi possível conectar/acessar o FTP.\n\n"
@@ -3773,6 +3852,7 @@ class ConfigUI(tk.Tk):
         installed = pyodbc.drivers()
         if driver not in installed:
             self.lic_sql_test_status.set("Falha")
+            self._save_licensing_last_status("sql_last_status", "Falha")
             messagebox.showerror(
                 "Testar SQL",
                 f"Driver ODBC não instalado nesta máquina:\n{driver}",
@@ -3856,6 +3936,7 @@ class ConfigUI(tk.Tk):
             )
 
             self.lic_sql_test_status.set("Conectado")
+            self._save_licensing_last_status("sql_last_status", "Conectado")
             messagebox.showinfo(
                 "Testar SQL",
                 "Conexão SQL realizada com sucesso.\n\n"
@@ -3866,6 +3947,7 @@ class ConfigUI(tk.Tk):
 
         except Exception as exc:
             self.lic_sql_test_status.set("Falha")
+            self._save_licensing_last_status("sql_last_status", "Falha")
             messagebox.showerror(
                 "Testar SQL",
                 "Não foi possível conectar ou consultar o SQL de licenciamento.\n\n"
@@ -3935,7 +4017,6 @@ class ConfigUI(tk.Tk):
             "ftp_password",
             "sql_password",
             "sql_trusted_connection",
-            "sql_driver",
             "sql_database",
             "sql_table",
             "license_filename",
@@ -4178,6 +4259,453 @@ class ConfigUI(tk.Tk):
 
         self._open_help_topic(topic)
 
+    def _write_local_license_state(self, status, support_code="", license_file=""):
+        """Grava o estado local da licença em licenci.ini."""
+        cfg = configparser.ConfigParser()
+        cfg["licenca"] = {
+            "status": status,
+            "support_code": support_code,
+            "license_file": license_file,
+        }
+        with open(LICENCI_PATH, "w", encoding="utf-8") as f:
+            cfg.write(f)
+
+    def _read_local_license_state(self):
+        """Lê licenci.ini e devolve o estado local da licença."""
+        if not os.path.exists(LICENCI_PATH):
+            return {
+                "status": "Não ativada",
+                "support_code": "",
+                "license_file": "",
+            }
+
+        cfg = configparser.ConfigParser()
+        try:
+            cfg.read(LICENCI_PATH, encoding="utf-8")
+            return {
+                "status": cfg.get("licenca", "status", fallback="Não ativada").strip(),
+                "support_code": cfg.get("licenca", "support_code", fallback="").strip(),
+                "license_file": cfg.get("licenca", "license_file", fallback="").strip(),
+            }
+        except Exception:
+            return {
+                "status": "Não ativada",
+                "support_code": "",
+                "license_file": "",
+            }
+
+    def _restore_local_license_status(self):
+        """
+        Restaura o status visual da licença ao abrir o Config.
+        O INI só vale para o mesmo Support Code e exige o .lic local.
+        """
+        state = self._read_local_license_state()
+        current_support = self.support_code_var.get().strip()
+
+        if (
+            state.get("status") == "Licenciada"
+            and state.get("support_code") == current_support
+        ):
+            license_name = state.get("license_file", "")
+            local_license = (
+                os.path.join(BASE_DIR, license_name)
+                if license_name
+                else ""
+            )
+
+            if local_license and os.path.isfile(local_license):
+                self.license_status_var.set("Licenciada")
+                try:
+                    self._apply_license_ui_mode()
+                except Exception:
+                    pass
+                return
+
+        self.license_status_var.set("Não ativada")
+        try:
+            self._apply_license_ui_mode()
+        except Exception:
+            pass
+
+    def _licensing_sql_connection(self, database):
+        """Abre conexão no SQL central de licenciamento usando a configuração Admin."""
+        driver = self.lic_sql_driver.get().strip()
+        server = self.lic_sql_server.get().strip()
+        port = self.lic_sql_port.get().strip()
+        user = self.lic_sql_user.get().strip()
+        password = self.lic_sql_password.get()
+
+        if not driver or not server or not user or not password:
+            raise RuntimeError("Configuração SQL de licenciamento incompleta.")
+
+        server_value = server
+        if port and "," not in server_value and "\\" not in server_value:
+            server_value = f"{server_value},{port}"
+
+        conn_str = (
+            f"DRIVER={{{driver}}};"
+            f"SERVER={server_value};"
+            f"DATABASE={database};"
+            f"UID={user};"
+            f"PWD={password};"
+            "TrustServerCertificate=yes;"
+        )
+        return pyodbc.connect(conn_str, timeout=8)
+
+    def _safe_licensing_table(self, value, fallback):
+        value = (value or fallback).replace("[", "").replace("]", "").strip()
+        if "." not in value:
+            value = "dbo." + value
+        parts = value.split(".")
+        if len(parts) != 2 or not all(
+            part.replace("_", "").isalnum() for part in parts
+        ):
+            raise RuntimeError(f"Nome de tabela inválido: {value}")
+        return value
+
+    def _format_license_date(self, value):
+        if value is None:
+            return "-"
+        try:
+            if hasattr(value, "strftime"):
+                return value.strftime("%d/%m/%Y")
+        except Exception:
+            pass
+
+        raw = str(value).strip()
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+            try:
+                from datetime import datetime
+                return datetime.strptime(raw[:10], fmt).strftime("%d/%m/%Y")
+            except Exception:
+                pass
+        return raw
+
+    def _delete_license_local_and_ftp(self):
+        """
+        Remove licence12.lic local e remoto.
+        Também tenta remover a pasta dos 9 primeiros caracteres se ficar vazia.
+        """
+        from ftplib import FTP
+        import posixpath
+
+        support_code = self.support_code_var.get().strip()
+        prefix = support_code[:9]
+
+        # Local
+        local_path = os.path.join(BASE_DIR, "licence12.lic")
+        try:
+            if os.path.isfile(local_path):
+                os.remove(local_path)
+        except Exception:
+            pass
+
+        # FTP
+        ftp = None
+        try:
+            host = self.lic_ftp_host.get().strip()
+            user = self.lic_ftp_user.get().strip()
+            password = self.lic_ftp_password.get()
+            port = int(self.lic_ftp_port.get().strip() or "21")
+            base_path = (
+                self.lic_ftp_base_path.get().strip()
+                or "/public_html/activate"
+            )
+
+            if host and user and password:
+                ftp = FTP()
+                ftp.connect(host=host, port=port, timeout=12)
+                ftp.login(user=user, passwd=password)
+                ftp.set_pasv(True)
+
+                remote_dir = posixpath.join(
+                    base_path.rstrip("/"),
+                    prefix,
+                )
+                ftp.cwd(remote_dir)
+
+                try:
+                    ftp.delete("licence12.lic")
+                except Exception:
+                    pass
+
+                # Volta à pasta base e tenta remover a pasta do prefixo
+                # somente se estiver vazia.
+                try:
+                    ftp.cwd(base_path.rstrip("/"))
+                    ftp.rmd(prefix)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        finally:
+            if ftp is not None:
+                try:
+                    ftp.quit()
+                except Exception:
+                    try:
+                        ftp.close()
+                    except Exception:
+                        pass
+
+    def _revoke_current_license(self, display_status="Licença expirada"):
+        """Invalida a licença local, remove o .lic e volta a exibir o botão Ativar."""
+        support_code = self.support_code_var.get().strip()
+
+        self._delete_license_local_and_ftp()
+        self._write_local_license_state(
+            display_status,
+            support_code=support_code,
+        )
+
+        self.license_status_var.set(display_status)
+        try:
+            self.btn_activate_license.pack(side="left")
+        except Exception:
+            pass
+
+        self._apply_license_ui_mode()
+
+    def _refresh_license_support_status(self, silent=True):
+        """
+        Consulta os dois bancos centrais pelo Support Code/Serial.
+
+        Demonstração:
+          1 = período válido
+          0/2 = período encerrado -> revoga a licença.
+
+        Suporte:
+          1 = suporte válido (verde)
+          0/2 = suporte expirado (vermelho, sem revogar)
+          3 = licença substituída/cancelada -> revoga a licença.
+        """
+        support_code = self.support_code_var.get().strip()
+        if not support_code:
+            return False
+
+        license_db = (
+            self.lic_sql_license_database.get().strip()
+            or "demonstracao"
+        )
+        support_db = (
+            self.lic_sql_support_database.get().strip()
+            or "Suporte"
+        )
+        license_table = self._safe_licensing_table(
+            self.lic_sql_license_table.get().strip(),
+            "dbo.Demonstracao",
+        )
+        support_table = self._safe_licensing_table(
+            self.lic_sql_support_table.get().strip(),
+            "dbo.ExpSuporte",
+        )
+
+        license_row = None
+        support_row = None
+
+        # ----- Período de teste / locação
+        conn = None
+        try:
+            conn = self._licensing_sql_connection(license_db)
+            cur = conn.cursor()
+            cur.execute(
+                f"""
+                SELECT TOP 1 DataIni, DataFim, Status
+                FROM {license_table}
+                WHERE Serial = ?
+                ORDER BY DataFim DESC
+                """,
+                support_code,
+            )
+            license_row = cur.fetchone()
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        # ----- Suporte
+        conn = None
+        try:
+            conn = self._licensing_sql_connection(support_db)
+            cur = conn.cursor()
+            cur.execute(
+                f"""
+                SELECT TOP 1 DataIni, DataFim, Status
+                FROM {support_table}
+                WHERE Serial = ?
+                ORDER BY DataFim DESC
+                """,
+                support_code,
+            )
+            support_row = cur.fetchone()
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        # ----- Aplica licença / período
+        if license_row:
+            data_ini, data_fim, raw_status = license_row
+            status = str(raw_status).strip()
+
+            self.license_period_var.set(
+                f"{self._format_license_date(data_ini)} a "
+                f"{self._format_license_date(data_fim)}"
+            )
+
+            try:
+                self.license_period_label.configure(
+                    foreground=("green" if status == "1" else "red")
+                )
+            except Exception:
+                pass
+
+            if status == "1":
+                # Só força Licenciada se o .lic local já foi validado.
+                state = self._read_local_license_state()
+                if (
+                    state.get("status") == "Licenciada"
+                    and state.get("support_code") == support_code
+                    and state.get("license_file")
+                    and os.path.isfile(
+                        os.path.join(BASE_DIR, state.get("license_file"))
+                    )
+                ):
+                    self.license_status_var.set("Licenciada")
+                    try:
+                        self.btn_activate_license.pack_forget()
+                    except Exception:
+                        pass
+            elif status in {"0", "2"}:
+                self._revoke_current_license("Licença expirada")
+
+        # ----- Aplica suporte
+        if support_row:
+            sup_ini, sup_fim, raw_sup_status = support_row
+            sup_status = str(raw_sup_status).strip()
+            period = (
+                f"{self._format_license_date(sup_ini)} a "
+                f"{self._format_license_date(sup_fim)}"
+            )
+            self.support_period_var.set(period)
+
+            if sup_status == "1":
+                self.support_status_var.set("Suporte válido")
+                color = "green"
+            elif sup_status in {"0", "2"}:
+                self.support_status_var.set("Suporte expirado")
+                color = "red"
+            elif sup_status == "3":
+                self.support_status_var.set("Licença cancelada")
+                color = "red"
+                self._revoke_current_license("Não ativada")
+            else:
+                self.support_status_var.set(f"Status de suporte: {sup_status}")
+                color = "black"
+
+            try:
+                self.support_status_label.configure(foreground=color)
+                self.support_period_label.configure(foreground=color)
+            except Exception:
+                pass
+        else:
+            self.support_status_var.set("Não informado")
+            self.support_period_var.set("Não informado")
+
+        return True
+
+    def _refresh_license_support_status_safe(self):
+        try:
+            self._refresh_license_support_status(silent=True)
+        except Exception:
+            # Nesta etapa, falha de internet/SQL não derruba a licença local.
+            pass
+
+    def _is_locally_licensed(self):
+        """Valida o estado local mínimo: licenci.ini + Support Code + arquivo .lic local."""
+        try:
+            state = self._read_local_license_state()
+            current_support = self.support_code_var.get().strip()
+
+            if (
+                state.get("status") != "Licenciada"
+                or state.get("support_code") != current_support
+            ):
+                return False
+
+            license_name = state.get("license_file", "").strip()
+            if not license_name:
+                return False
+
+            return os.path.isfile(os.path.join(BASE_DIR, license_name))
+        except Exception:
+            return False
+
+    def _apply_license_ui_mode(self):
+        """
+        Sem licença válida:
+          - libera somente Sobre e Licenciamento (Admin)
+          - desabilita todas as outras abas
+          - exibe aviso de licenciamento
+
+        Com licença válida:
+          - libera todas as abas
+          - oculta botão Ativar
+          - remove aviso
+        """
+        try:
+            licensed = (
+                self.license_status_var.get().strip() == "Licenciada"
+                and self._is_locally_licensed()
+            )
+
+            allowed = {
+                str(self.tab_about),
+                str(self.tab_licensing_admin),
+            }
+
+            for tab_id in self.nb.tabs():
+                if licensed:
+                    self.nb.tab(tab_id, state="normal")
+                else:
+                    self.nb.tab(
+                        tab_id,
+                        state=("normal" if tab_id in allowed else "disabled"),
+                    )
+
+            if licensed:
+                try:
+                    self.btn_activate_license.pack_forget()
+                except Exception:
+                    pass
+                try:
+                    self.license_required_var.set("")
+                except Exception:
+                    pass
+            else:
+                try:
+                    self.btn_activate_license.pack(side="left")
+                except Exception:
+                    pass
+                try:
+                    self.license_required_var.set(
+                        "Aplicação não licenciada. "
+                        "Ative a licença para liberar os recursos."
+                    )
+                except Exception:
+                    pass
+
+                current = self.nb.select()
+                if current not in allowed:
+                    self.nb.select(self.tab_about)
+
+        except Exception:
+            pass
+
     def _build_about_tab(self):
         """Tela Sobre com a estrutura inicial do futuro licenciamento."""
         container = ttk.Frame(self.tab_about)
@@ -4258,6 +4786,7 @@ class ConfigUI(tk.Tk):
             row=1, column=0, sticky="w", padx=10, pady=5
         )
         self.license_status_var = tk.StringVar(value="Não ativada")
+        self._restore_local_license_status()
         ttk.Label(
             license_box,
             textvariable=self.license_status_var,
@@ -4268,32 +4797,66 @@ class ConfigUI(tk.Tk):
             row=2, column=0, sticky="w", padx=10, pady=5
         )
         self.license_period_var = tk.StringVar(value="Não informado")
-        ttk.Label(
+        self.license_period_label = tk.Label(
             license_box,
             textvariable=self.license_period_var,
-        ).grid(row=2, column=1, sticky="w", padx=(0, 10), pady=5)
+            anchor="w",
+        )
+        self.license_period_label.grid(
+            row=2, column=1, sticky="w", padx=(0, 10), pady=5
+        )
+
+        ttk.Label(license_box, text="Status do Suporte:").grid(
+            row=3, column=0, sticky="w", padx=10, pady=5
+        )
+        self.support_status_var = tk.StringVar(value="Não informado")
+        self.support_status_label = tk.Label(
+            license_box,
+            textvariable=self.support_status_var,
+            anchor="w",
+            font=("Segoe UI", 10, "bold"),
+        )
+        self.support_status_label.grid(
+            row=3, column=1, sticky="w", padx=(0, 10), pady=5
+        )
+
+        ttk.Label(license_box, text="Período do Suporte:").grid(
+            row=4, column=0, sticky="w", padx=10, pady=5
+        )
+        self.support_period_var = tk.StringVar(value="Não informado")
+        self.support_period_label = tk.Label(
+            license_box,
+            textvariable=self.support_period_var,
+            anchor="w",
+        )
+        self.support_period_label.grid(
+            row=4, column=1, sticky="w", padx=(0, 10), pady=5
+        )
 
         buttons = ttk.Frame(license_box)
         buttons.grid(
-            row=3, column=0, columnspan=2, sticky="w",
+            row=5, column=0, columnspan=2, sticky="w",
             padx=10, pady=(8, 12)
         )
 
-        ttk.Button(
+        self.btn_activate_license = ttk.Button(
             buttons,
             text="Ativar Licença",
             command=self._activate_license_test,
-        ).pack(side="left")
+        )
+        self.btn_activate_license.pack(side="left")
+
+        if self.license_status_var.get().strip() == "Licenciada":
+            self.btn_activate_license.pack_forget()
 
         ttk.Label(
             license_box,
             text=(
-                "A ativação da licença será configurada nas próximas etapas. "
-                "Use o botão Copiar para enviar o Código de Suporte pelo canal desejado."
+                "A licença é vinculada ao Código de Suporte deste PC."
             ),
             wraplength=700,
         ).grid(
-            row=4, column=0, columnspan=2,
+            row=6, column=0, columnspan=2,
             sticky="w", padx=10, pady=(0, 10)
         )
 
@@ -4301,6 +4864,11 @@ class ConfigUI(tk.Tk):
             container,
             text="© 2026 2A Tecnologia. Todos os direitos reservados.",
         ).pack(anchor="w", pady=(8, 0))
+
+        self.after(100, self._apply_license_ui_mode)
+
+        # Atualiza período de licença e suporte após a construção da tela.
+        self.after(250, self._refresh_license_support_status_safe)
 
     def _get_support_code(self):
         """
@@ -4500,105 +5068,47 @@ class ConfigUI(tk.Tk):
 
 
     def _decrypt_kalipso_license_windows(self, iv, cipher, support_code):
-        """
-        Decrypt definitivo compatível com o License13.lic:
-        AES-128 CBC + PKCS5/PKCS7, texto original UTF-16 LE.
-
-        O PowerShell devolve os bytes descriptografados em Base64 para evitar
-        qualquer alteração de encoding na passagem PowerShell -> Python.
-        """
-        import base64
-        import json
-        import subprocess
-
-        license_key = "2ATecLic2026Key!"
-
-        payload = {
-            "iv": base64.b64encode(iv).decode("ascii"),
-            "cipher": base64.b64encode(cipher).decode("ascii"),
-            "key": license_key,
-        }
-
-        ps = r"""
-$ErrorActionPreference = "Stop"
-$payload = ConvertFrom-Json '__PAYLOAD__'
-
-[byte[]]$iv = [Convert]::FromBase64String([string]$payload.iv)
-[byte[]]$cipher = [Convert]::FromBase64String([string]$payload.cipher)
-[byte[]]$key = [Text.Encoding]::UTF8.GetBytes([string]$payload.key)
-
-$aes = [System.Security.Cryptography.Aes]::Create()
-$aes.KeySize = 128
-$aes.BlockSize = 128
-$aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
-$aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
-$aes.Key = $key
-$aes.IV = $iv
-
-$decryptor = $aes.CreateDecryptor()
-
-try {
-    [byte[]]$plain = $decryptor.TransformFinalBlock(
-        $cipher, 0, $cipher.Length
-    )
-
-    # Retorna bytes, e não texto, para não sofrer conversão de encoding.
-    Write-Output ([Convert]::ToBase64String($plain))
-}
-finally {
-    $decryptor.Dispose()
-    $aes.Dispose()
-}
-"""
-
-        ps = ps.replace(
-            "__PAYLOAD__",
-            json.dumps(payload).replace("'", "''"),
-        )
-
-        result = subprocess.run(
-            [
-                "powershell",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                "-",
-            ],
-            input=ps,
-            capture_output=True,
-            text=True,
-            timeout=15,
-            creationflags=getattr(
-                subprocess,
-                "CREATE_NO_WINDOW",
-                0,
-            ),
-        )
-
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout or "").strip()
+        """Decrypt AES-128-CBC diretamente em Python."""
+        try:
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+            from cryptography.hazmat.primitives import padding
+        except ImportError as exc:
             raise RuntimeError(
-                f"Falha no Decrypt AES da licença: {detail}"
-            )
+                "Biblioteca 'cryptography' não instalada. Execute: pip install cryptography"
+            ) from exc
 
-        encoded_plain = (result.stdout or "").strip()
+        license_key = b"2ATecLic2026Key!"
+
+        if len(iv) != 16:
+            raise RuntimeError(f"IV inválido: esperado 16 bytes, recebido {len(iv)}.")
+
+        if not cipher or len(cipher) % 16 != 0:
+            raise RuntimeError(
+                "Ciphertext inválido: o tamanho precisa ser múltiplo de 16 bytes."
+            )
 
         try:
-            plain_bytes = base64.b64decode(encoded_plain)
+            decryptor = Cipher(
+                algorithms.AES(license_key),
+                modes.CBC(iv),
+            ).decryptor()
+
+            padded_plain = decryptor.update(cipher) + decryptor.finalize()
+
+            unpadder = padding.PKCS7(128).unpadder()
+            plain_bytes = unpadder.update(padded_plain) + unpadder.finalize()
+
             plain = plain_bytes.decode("utf-16-le")
+            plain = plain.lstrip("\ufeff").rstrip("\x00").strip()
+
         except Exception as exc:
             raise RuntimeError(
-                f"Decrypt executado, mas não foi possível interpretar o texto: {exc}"
-            )
-
-        plain = plain.lstrip("\ufeff").rstrip("\x00").strip()
+                f"Falha ao descriptografar a licença: {exc}"
+            ) from exc
 
         if plain == support_code:
             return plain, "AES-128-CBC"
 
-        # Diagnóstico seguro: não mostra chave; mostra apenas o resultado
-        # recuperado e o código esperado para identificar diferenças.
         return plain, (
             "SUPPORT_CODE_DIFERENTE | "
             f"Esperado={support_code!r} | "
@@ -4657,20 +5167,54 @@ finally {
             ftp.login(user=user, passwd=password)
             ftp.set_pasv(True)
 
-            remote_dir = posixpath.join(base_path.rstrip("/"), prefix)
+            remote_dir = posixpath.join(
+                base_path.rstrip("/"),
+                prefix,
+            )
             ftp.cwd(remote_dir)
 
-            lic_names = sorted({
+            remote_files = [
                 os.path.basename(name)
                 for name in ftp.nlst()
-                if os.path.basename(name).lower().endswith(".lic")
-            })
+            ]
+
+            # O servidor já teve as duas grafias em testes:
+            # License12.lic e Licence12.lic.
+            # Usa sempre o nome REAL devolvido pelo FTP, preservando maiúsculas/minúsculas.
+            accepted_names = {
+                "license12.lic",
+                "licence12.lic",
+            }
+
+            exact_name = next(
+                (
+                    name
+                    for name in remote_files
+                    if name.lower() in accepted_names
+                ),
+                None,
+            )
+
+            if exact_name:
+                lic_names = [exact_name]
+            else:
+                lic_names = []
 
             if not lic_names:
                 self.license_status_var.set("Não ativada")
+                try:
+                    self.btn_activate_license.pack(side="left")
+                except Exception:
+                    pass
+
+                self._write_local_license_state(
+                    "Não ativada",
+                    support_code=support_code,
+                )
+                self._apply_license_ui_mode()
                 messagebox.showwarning(
                     "Ativar Licença",
-                    "Nenhum arquivo .lic foi encontrado para esta máquina.",
+                    "Licença não encontrada para este terminal.",
                     parent=self,
                 )
                 return
@@ -4698,13 +5242,35 @@ finally {
 
                     if plain == support_code:
                         self.license_status_var.set("Licenciada")
+                        try:
+                            self.btn_activate_license.pack_forget()
+                        except Exception:
+                            pass
+
+                        self._write_local_license_state(
+                            "Licenciada",
+                            support_code=support_code,
+                            license_file=remote_name,
+                        )
+
+                        # Já traz período de teste/locação e suporte nesta ativação.
+                        self._refresh_license_support_status_safe()
+
+                        # Se o SQL central revogou a licença, não mostra sucesso.
+                        if self.license_status_var.get().strip() != "Licenciada":
+                            self._apply_license_ui_mode()
+                            messagebox.showwarning(
+                                "Ativar Licença",
+                                "A licença foi localizada, porém o período não está válido.",
+                                parent=self,
+                            )
+                            return
+
+                        self._apply_license_ui_mode()
+
                         messagebox.showinfo(
                             "Ativar Licença",
-                            "Licença ativada com sucesso.\n\n"
-                            "O conteúdo descriptografado corresponde ao Código de Suporte "
-                            "desta máquina.\n\n"
-                            f"Arquivo: {remote_name}\n"
-                            f"Método: {method}",
+                            "Licença ativada com sucesso neste PC.",
                             parent=self,
                         )
                         return
@@ -4715,6 +5281,16 @@ finally {
                     last_detail = str(exc)
 
             self.license_status_var.set("Licença inválida")
+            try:
+                self.btn_activate_license.pack(side="left")
+            except Exception:
+                pass
+
+            self._write_local_license_state(
+                "Licença inválida",
+                support_code=support_code,
+            )
+            self._apply_license_ui_mode()
             messagebox.showwarning(
                 "Ativar Licença",
                 "O arquivo .lic foi encontrado e baixado, mas o conteúdo "
@@ -4725,12 +5301,39 @@ finally {
 
         except Exception as exc:
             self.license_status_var.set("Não ativada")
-            messagebox.showerror(
-                "Ativar Licença",
-                "Não foi possível concluir a ativação.\n\n"
-                f"Detalhe: {exc}",
-                parent=self,
-            )
+
+            detail = str(exc).lower()
+
+            # FTP 550 é o retorno normal quando a pasta da máquina
+            # ou o arquivo de licença ainda não existe.
+            if (
+                "550" in detail
+                or "no such file" in detail
+                or "no such directory" in detail
+                or "not found" in detail
+            ):
+                try:
+                    self.btn_activate_license.pack(side="left")
+                except Exception:
+                    pass
+
+                self._write_local_license_state(
+                    "Não ativada",
+                    support_code=support_code,
+                )
+
+                messagebox.showwarning(
+                    "Ativar Licença",
+                    "Licença não encontrada para este terminal.",
+                    parent=self,
+                )
+            else:
+                messagebox.showerror(
+                    "Ativar Licença",
+                    "Não foi possível concluir a ativação.\n\n"
+                    f"Detalhe: {exc}",
+                    parent=self,
+                )
         finally:
             if ftp is not None:
                 try:
@@ -4743,44 +5346,30 @@ finally {
 
 
     def _on_main_tab_changed(self, event=None):
-        """Maximiza somente a aba Ambiente de Testes e restaura nas demais."""
+        """Mantém o Config maximizado em todas as abas."""
         try:
             current = self.nb.select()
 
             if current == str(self.tab_connector):
-                # Consulta a conexão de verdade ao entrar na aba.
-                self.after(100, self._refresh_external_connection_status_silent)
+                self.after(
+                    100,
+                    self._refresh_external_connection_status_silent,
+                )
 
-            # As abas com maior quantidade de informação usam tela maximizada.
-            maximize_tabs = {
-                str(self.tab_test_environment),
-                str(self.tab_licensing_admin),
-            }
+            try:
+                if self.state() != "zoomed":
+                    self.state("zoomed")
+            except Exception:
+                try:
+                    self.attributes("-zoomed", True)
+                except Exception:
+                    pass
 
-            if current in maximize_tabs:
-                if not self._test_env_maximized:
-                    self._normal_geometry = self.geometry()
-                    try:
-                        self.state("zoomed")
-                    except Exception:
-                        self.attributes("-zoomed", True)
-                    self._test_env_maximized = True
-            else:
-                if self._test_env_maximized:
-                    try:
-                        self.state("normal")
-                    except Exception:
-                        try:
-                            self.attributes("-zoomed", False)
-                        except Exception:
-                            pass
+            self._test_env_maximized = True
 
-                    if self._normal_geometry:
-                        self.geometry(self._normal_geometry)
-
-                    self._test_env_maximized = False
         except Exception:
             pass
+
 
     def _select_initial_tab(self):
         initial = str(self.initial_tab).strip().lower()
