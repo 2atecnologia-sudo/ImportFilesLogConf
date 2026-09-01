@@ -3054,6 +3054,24 @@ class ConfigUI(tk.Tk):
         self.logs_nb.add(self.tab_log_tecnico, text="Log Técnico")
 
         # ---- Log do usuário ----
+        user_log_controls = ttk.Frame(self.tab_log_usuario)
+        user_log_controls.grid(
+            row=0,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            padx=4,
+            pady=(4, 2),
+        )
+
+        self.log_auto_scroll_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            user_log_controls,
+            text="Rolagem automática",
+            variable=self.log_auto_scroll_var,
+            command=self._on_log_auto_scroll_changed,
+        ).pack(side="left")
+
         self.log_text = tk.Text(
             self.tab_log_usuario,
             wrap="none",
@@ -3076,10 +3094,10 @@ class ConfigUI(tk.Tk):
             xscrollcommand=user_x.set,
         )
 
-        self.log_text.grid(row=0, column=0, sticky="nsew")
-        user_y.grid(row=0, column=1, sticky="ns")
-        user_x.grid(row=1, column=0, sticky="ew")
-        self.tab_log_usuario.grid_rowconfigure(0, weight=1)
+        self.log_text.grid(row=1, column=0, sticky="nsew")
+        user_y.grid(row=1, column=1, sticky="ns")
+        user_x.grid(row=2, column=0, sticky="ew")
+        self.tab_log_usuario.grid_rowconfigure(1, weight=1)
         self.tab_log_usuario.grid_columnconfigure(0, weight=1)
 
         # ---- Log técnico ----
@@ -3120,6 +3138,14 @@ class ConfigUI(tk.Tk):
             command=self._refresh_status_tab,
         ).pack(side="left")
 
+
+    def _on_log_auto_scroll_changed(self):
+        """Ao reativar a rolagem automática, volta imediatamente ao evento mais recente."""
+        try:
+            if self.log_auto_scroll_var.get():
+                self.log_text.see("1.0")
+        except Exception:
+            pass
 
     def _clear_logs_after_test_reset(self):
         """Limpa somente os logs quando o usuário optar por isso após o reset."""
@@ -5563,10 +5589,28 @@ class ConfigUI(tk.Tk):
         )
 
         events = self._read_recent_events()
+
+        # Guarda a posição atual caso o usuário esteja lendo o log manualmente.
+        try:
+            current_user_log_y = self.log_text.yview()[0]
+        except Exception:
+            current_user_log_y = 0.0
+
         self.log_text.configure(state="normal")
         self.log_text.delete("1.0", "end")
         self.log_text.insert("1.0", "\n".join(events))
-        self.log_text.see("1.0")
+
+        if (
+            not hasattr(self, "log_auto_scroll_var")
+            or self.log_auto_scroll_var.get()
+        ):
+            # Os eventos mais recentes ficam no topo do Log do Usuário.
+            self.log_text.see("1.0")
+        else:
+            # Novas mensagens continuam sendo carregadas, mas a tela
+            # permanece onde o usuário deixou para permitir a leitura.
+            self.log_text.yview_moveto(current_user_log_y)
+
         self.log_text.configure(state="disabled")
 
         technical_events = self._read_technical_events()
