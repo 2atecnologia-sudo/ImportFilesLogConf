@@ -805,6 +805,12 @@ class ConfigUI(tk.Tk):
             command=self._edit_test_stock_balance,
         ).pack(side="left")
 
+        ttk.Button(
+            stock_manual_actions,
+            text="Editar Local...",
+            command=self._edit_test_stock_location,
+        ).pack(side="left", padx=(8, 0))
+
         self._build_readonly_grid(
             tab_stock, "test_stock_tree", "test_stock_status",
             [
@@ -2258,6 +2264,261 @@ class ConfigUI(tk.Tk):
                     pass
 
 
+    def _edit_test_stock_location(self):
+        """
+        Ajuste manual SOMENTE do LOCAL_ESTOQUE de uma posição do estoque de testes.
+
+        Segurança:
+        - não altera código, GTIN, descrição ou saldo;
+        - exige exatamente uma posição correspondente ao item selecionado;
+        - impede criar outra posição igual para o mesmo produto/GTIN;
+        - registra o ajuste em dbo.movEstambTeste para manter auditoria;
+        - não altera o estoque-base da demonstração.
+        """
+        tree = getattr(self, "test_stock_tree", None)
+        if tree is None:
+            return
+
+        selected = tree.selection()
+        if not selected:
+            messagebox.showwarning(
+                "Editar Local",
+                "Selecione primeiro um produto na grade Estoque Atual.",
+                parent=self,
+            )
+            return
+
+        values = tree.item(selected[0], "values")
+        if not values or len(values) < 5:
+            messagebox.showerror(
+                "Editar Local",
+                "Não foi possível identificar os dados do produto selecionado.",
+                parent=self,
+            )
+            return
+
+        codprod = str(values[0] or "").strip()
+        gtin = str(values[1] or "").strip()
+        descricao = str(values[2] or "").strip()
+        local_atual = str(values[3] or "").strip()
+        saldo_txt = str(values[4] or "0").strip()
+
+        try:
+            saldo_atual = Decimal(saldo_txt.replace(",", "."))
+        except Exception:
+            saldo_atual = Decimal("0")
+
+        novo_local = simpledialog.askstring(
+            "Editar Local",
+            (
+                f"Produto: {codprod or '-'}\n"
+                f"GTIN: {gtin or '-'}\n"
+                f"Descrição: {descricao or '-'}\n"
+                f"Local atual: {local_atual or '-'}\n\n"
+                "Informe o NOVO local:"
+            ),
+            parent=self,
+            initialvalue=local_atual,
+        )
+
+        if novo_local is None:
+            return
+
+        novo_local = str(novo_local).strip()
+
+        if not novo_local:
+            messagebox.showerror(
+                "Editar Local",
+                "O novo local não pode ficar vazio.",
+                parent=self,
+            )
+            return
+
+        if len(novo_local) > 100:
+            messagebox.showerror(
+                "Editar Local",
+                "O novo local deve possuir no máximo 100 caracteres.",
+                parent=self,
+            )
+            return
+
+        if novo_local == local_atual:
+            messagebox.showinfo(
+                "Editar Local",
+                "O novo local é igual ao local atual. Nenhuma alteração foi realizada.",
+                parent=self,
+            )
+            return
+
+        if not messagebox.askyesno(
+            "Confirmar Alteração de Local",
+            (
+                f"Produto: {codprod or '-'}\n"
+                f"GTIN: {gtin or '-'}\n"
+                f"Descrição: {descricao or '-'}\n\n"
+                f"Local atual: {local_atual or '-'}\n"
+                f"Novo local: {novo_local}\n\n"
+                "Confirmar a alteração manual?"
+            ),
+            parent=self,
+        ):
+            return
+
+        conn = None
+        try:
+            conn = pyodbc.connect(
+                self._build_test_environment_write_conn_str(),
+                timeout=5,
+                autocommit=False,
+            )
+            cur = conn.cursor()
+
+            # Garante que estamos alterando exatamente a posição selecionada.
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM dbo.ESTOQUE
+                WHERE LTRIM(RTRIM(ISNULL(COD_ITEM, ''))) = ?
+                  AND LTRIM(RTRIM(ISNULL(COD_BARRAS, ''))) = ?
+                  AND LTRIM(RTRIM(ISNULL(LOCAL_ESTOQUE, ''))) = ?
+                """,
+                (codprod, gtin, local_atual),
+            )
+            total_atual = int(cur.fetchone()[0])
+
+            if total_atual != 1:
+                raise RuntimeError(
+                    f"Esperada exatamente 1 posição de estoque para o item selecionado; "
+                    f"encontrado(s): {total_atual}."
+                )
+
+            # Impede criar duas posições idênticas do mesmo produto no mesmo local.
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM dbo.ESTOQUE
+                WHERE LTRIM(RTRIM(ISNULL(COD_ITEM, ''))) = ?
+                  AND LTRIM(RTRIM(ISNULL(COD_BARRAS, ''))) = ?
+                  AND LTRIM(RTRIM(ISNULL(LOCAL_ESTOQUE, ''))) = ?
+                """,
+                (codprod, gtin, novo_local),
+            )
+            total_destino = int(cur.fetchone()[0])
+
+            if total_destino > 0:
+                raise RuntimeError(
+                    f"Já existe uma posição de estoque para este produto no local '{novo_local}'. "
+                    "Nenhuma alteração foi realizada."
+                )
+
+            cur.execute(
+                """
+                UPDATE dbo.ESTOQUE
+                SET LOCAL_ESTOQUE = ?
+                WHERE LTRIM(RTRIM(ISNULL(COD_ITEM, ''))) = ?
+                  AND LTRIM(RTRIM(ISNULL(COD_BARRAS, ''))) = ?
+                  AND LTRIM(RTRIM(ISNULL(LOCAL_ESTOQUE, ''))) = ?
+                """,
+                (novo_local, codprod, gtin, local_atual),
+            )
+
+            if cur.rowcount != 1:
+                raise RuntimeError(
+                    f"A alteração deveria afetar exatamente 1 registro; afetou {cur.rowcount}."
+                )
+
+            self._ensure_test_movement_description_column(cur)
+
+            cur.execute(
+                """
+                INSERT INTO dbo.movEstambTeste
+                (
+                    NUM_DOCUMENTO,
+                    COD_ITEM,
+                    COD_BARRAS,
+                    DESCRICAO_ITEM,
+                    QTD_MOVIMENTADA,
+                    SALDO_ANTERIOR,
+                    SALDO_POSTERIOR,
+                    IDENT_TERMINAL,
+                    TIPO_OPERACAO,
+                    RESULTADO,
+                    DETALHE
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "AJUSTE_LOCAL",
+                    codprod or None,
+                    gtin or None,
+                    descricao,
+                    Decimal("0"),
+                    saldo_atual,
+                    saldo_atual,
+                    None,
+                    "AJUSTE_LOCAL",
+                    "SUCESSO",
+                    (
+                        f"Ajuste manual de local | {descricao} | "
+                        f"Local anterior: {local_atual or '-'} | Novo local: {novo_local}"
+                    ),
+                ),
+            )
+
+            conn.commit()
+
+            self._write_test_user_log(
+                "OK",
+                "AJUSTE MANUAL DE LOCAL",
+                (
+                    f"Local alterado de {local_atual or '-'} para {novo_local} "
+                    f"no produto {codprod or gtin or '-'}."
+                ),
+                "A alteração foi registrada no histórico do Ambiente de Testes.",
+                [
+                    f"CodProd: {codprod or '-'}",
+                    f"GTIN: {gtin or '-'}",
+                    f"Local anterior: {local_atual or '-'}",
+                    f"Novo local: {novo_local}",
+                    f"Saldo preservado: {saldo_atual}",
+                ],
+            )
+
+            self._refresh_test_stock()
+            self._refresh_test_moves()
+
+            messagebox.showinfo(
+                "Editar Local",
+                (
+                    "Local atualizado com sucesso.\n\n"
+                    f"Local anterior: {local_atual or '-'}\n"
+                    f"Novo local: {novo_local}\n"
+                    f"Saldo preservado: {saldo_atual}"
+                ),
+                parent=self,
+            )
+
+        except Exception as e:
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+
+            messagebox.showerror(
+                "Editar Local",
+                f"Nenhuma alteração foi confirmada.\n\nDetalhe: {e}",
+                parent=self,
+            )
+
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+
     def _save_nfe_watch_settings(self):
         """Persiste somente as opções da pasta de NF-e de entrada."""
         cfg = load_cfg()
@@ -3048,9 +3309,11 @@ class ConfigUI(tk.Tk):
         self.logs_nb.pack(fill="both", expand=True, padx=4, pady=4)
 
         self.tab_log_usuario = ttk.Frame(self.logs_nb)
+        self.tab_log_arquivos = ttk.Frame(self.logs_nb)
         self.tab_log_tecnico = ttk.Frame(self.logs_nb)
 
         self.logs_nb.add(self.tab_log_usuario, text="Log do Usuário")
+        self.logs_nb.add(self.tab_log_arquivos, text="Arquivos")
         self.logs_nb.add(self.tab_log_tecnico, text="Log Técnico")
 
         # ---- Log do usuário ----
@@ -3099,6 +3362,53 @@ class ConfigUI(tk.Tk):
         user_x.grid(row=2, column=0, sticky="ew")
         self.tab_log_usuario.grid_rowconfigure(1, weight=1)
         self.tab_log_usuario.grid_columnconfigure(0, weight=1)
+
+        # ---- Arquivos ----
+        arquivos_top = ttk.Frame(self.tab_log_arquivos)
+        arquivos_top.grid(row=0, column=0, columnspan=2, sticky="ew", padx=4, pady=(4, 2))
+        ttk.Label(
+            arquivos_top,
+            text=(
+                "Acompanhamento operacional dos arquivos recebidos. "
+                "Erros de conteúdo e pendências também aparecem aqui."
+            ),
+        ).pack(side="left")
+
+        file_columns = ("hora", "arquivo", "tipo", "coletor", "status", "detalhe")
+        self.file_events_tree = ttk.Treeview(
+            self.tab_log_arquivos,
+            columns=file_columns,
+            show="headings",
+            height=14,
+        )
+        self.file_events_tree.heading("hora", text="Data/Hora")
+        self.file_events_tree.heading("arquivo", text="Arquivo")
+        self.file_events_tree.heading("tipo", text="Tipo")
+        self.file_events_tree.heading("coletor", text="Coletor")
+        self.file_events_tree.heading("status", text="Status")
+        self.file_events_tree.heading("detalhe", text="Detalhe")
+
+        self.file_events_tree.column("hora", width=145, stretch=False)
+        self.file_events_tree.column("arquivo", width=235, stretch=True)
+        self.file_events_tree.column("tipo", width=90, stretch=False)
+        self.file_events_tree.column("coletor", width=130, stretch=False)
+        self.file_events_tree.column("status", width=140, stretch=False)
+        self.file_events_tree.column("detalhe", width=480, stretch=True)
+
+        files_y = ttk.Scrollbar(
+            self.tab_log_arquivos, orient="vertical", command=self.file_events_tree.yview
+        )
+        files_x = ttk.Scrollbar(
+            self.tab_log_arquivos, orient="horizontal", command=self.file_events_tree.xview
+        )
+        self.file_events_tree.configure(
+            yscrollcommand=files_y.set, xscrollcommand=files_x.set
+        )
+        self.file_events_tree.grid(row=1, column=0, sticky="nsew")
+        files_y.grid(row=1, column=1, sticky="ns")
+        files_x.grid(row=2, column=0, sticky="ew")
+        self.tab_log_arquivos.grid_rowconfigure(1, weight=1)
+        self.tab_log_arquivos.grid_columnconfigure(0, weight=1)
 
         # ---- Log técnico ----
         self.tech_log_text = tk.Text(
@@ -5544,6 +5854,116 @@ class ConfigUI(tk.Tk):
         except Exception as e:
             return [f"Não foi possível ler o log técnico: {e}"]
 
+    def _read_file_events(self, max_events=300):
+        """
+        Extrai do importador.log uma visão operacional focada em arquivos.
+
+        Não altera o log técnico nem o processamento. Apenas interpreta as
+        mensagens já gravadas para facilitar a operação diária.
+        """
+        log_dir = self.cfg.get(
+            "logging", "log_dir", fallback=os.path.join(BASE_DIR, "logs")
+        ).strip()
+        log_path = os.path.join(log_dir, "importador.log")
+
+        if not os.path.isfile(log_path):
+            return []
+
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                linhas = [line.rstrip("\r\n") for line in f if line.strip()]
+        except Exception:
+            return []
+
+        eventos = []
+        # Ajuda a completar linhas como NFLOG SQL OK, que não repetem o Coletor.
+        coletor_por_arquivo = {}
+        tipo_por_arquivo = {}
+
+        for linha in linhas:
+            m = re.match(
+                r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:,\d+)? \| \w+ \| (.*)$",
+                linha,
+            )
+            if not m:
+                continue
+
+            hora, msg = m.group(1), m.group(2)
+            arquivo = ""
+            tipo = ""
+            coletor = ""
+            status = ""
+
+            ma = re.search(r"Arquivo(?: recebido)?=([^|]+)", msg, re.IGNORECASE)
+            if ma:
+                arquivo = os.path.basename(ma.group(1).strip())
+
+            mc = re.search(r"Coletor=([^|]+)", msg, re.IGNORECASE)
+            if mc:
+                coletor = mc.group(1).strip()
+
+            mt = re.search(r"Tipo=([^|]+)", msg, re.IGNORECASE)
+            if mt:
+                tipo = mt.group(1).strip().upper()
+
+            if msg.startswith("[ARQUIVO]"):
+                status = "DETECTADO"
+            elif msg.startswith("[NFLOG RECEBIDO]"):
+                tipo, status = "NFLOG", "PROCESSANDO"
+            elif msg.startswith("[NFLOG SQL OK]"):
+                tipo, status = "NFLOG", "IMPORTADO SQL"
+            elif msg.startswith("[NFLOG SQL JA IMPORTADO]"):
+                tipo, status = "NFLOG", "JÁ IMPORTADO"
+            elif msg.startswith("[NFLOG AGUARDANDO OK]"):
+                tipo, status = "NFLOG", "AGUARDANDO .OK"
+            elif msg.startswith("[NFLOG CONFIRMADO]"):
+                tipo, status = "NFLOG", "CONFIRMADO"
+            elif msg.startswith("[NFLOG ARQUIVADO]"):
+                tipo, status = "NFLOG", "ARQUIVADO"
+            elif msg.startswith("[NFLOG VARREDURA][ERRO]"):
+                tipo, status = "NFLOG", "ERRO"
+            elif msg.startswith("[NFLOG VARREDURA]"):
+                tipo, status = "NFLOG", "VARREDURA"
+            elif msg.startswith("[SCANOCOR"):
+                tipo = "SCANOCOR"
+                status = "ERRO" if "ERRO" in msg or "PENDENTE" in msg else "PROCESSADO"
+            elif msg.startswith("[SYNC PENDENTE]"):
+                tipo, status = "LOG/PROD", "PENDENTE"
+            elif msg.startswith("[SYNC ABORTADA]") or msg.startswith("[SYNC][SQL PENDENTE]"):
+                tipo, status = "LOG/PROD", "ERRO"
+            elif msg.startswith("[SYNC ") or msg.startswith("[SYNC]"):
+                tipo, status = "LOG/PROD", "PROCESSADO"
+            elif msg.startswith("[ARQUIVO IGNORADO]"):
+                status = "IGNORADO"
+                mi = re.search(r"padrão:\s*(.+)$", msg, re.IGNORECASE)
+                if mi:
+                    arquivo = os.path.basename(mi.group(1).strip())
+            elif msg.startswith("Erro processando ") or msg.startswith("Erro processando existente "):
+                status = "ERRO"
+                me = re.search(r"Erro processando(?: existente)? (.+?): (.+)$", msg)
+                if me:
+                    arquivo = os.path.basename(me.group(1).strip())
+
+            # Somente mensagens relacionadas a arquivos entram nesta visão.
+            if not (arquivo or tipo or status):
+                continue
+
+            if arquivo:
+                if coletor:
+                    coletor_por_arquivo[arquivo.lower()] = coletor
+                elif arquivo.lower() in coletor_por_arquivo:
+                    coletor = coletor_por_arquivo[arquivo.lower()]
+
+                if tipo:
+                    tipo_por_arquivo[arquivo.lower()] = tipo
+                elif arquivo.lower() in tipo_por_arquivo:
+                    tipo = tipo_por_arquivo[arquivo.lower()]
+
+            eventos.append((hora, arquivo or "-", tipo or "-", coletor or "-", status or "INFO", msg))
+
+        eventos.reverse()
+        return eventos[:max_events]
+
     def _last_result_from_log(self) -> str:
         lines = self._read_recent_events(max_lines=80)
         for line in reversed(lines):
@@ -5612,6 +6032,13 @@ class ConfigUI(tk.Tk):
             self.log_text.yview_moveto(current_user_log_y)
 
         self.log_text.configure(state="disabled")
+
+        # Atualiza a visão operacional de arquivos sem alterar os logs originais.
+        if hasattr(self, "file_events_tree"):
+            for item in self.file_events_tree.get_children():
+                self.file_events_tree.delete(item)
+            for evento in self._read_file_events():
+                self.file_events_tree.insert("", "end", values=evento)
 
         technical_events = self._read_technical_events()
         self.tech_log_text.configure(state="normal")

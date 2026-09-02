@@ -50,9 +50,17 @@ _retry_sql_em_execucao = False
 # ============================================================
 
 _EXTERNAL_PREFLIGHT_INTERVAL_SEC = 10
+
+# Erros de negócio (ex.: saldo insuficiente, produto/localização inexistente)
+# não precisam consultar a fonte externa a cada 10 segundos.
+# Continuam sendo reavaliados automaticamente para permitir recuperação
+# após correção de saldo/cadastro no sistema externo.
+_EXTERNAL_BUSINESS_RETRY_SEC = 300  # 5 minutos
+
 _external_preflight_lock = threading.Lock()
 _external_preflight_em_execucao = False
 _external_preflight_aprovados = set()
+_external_preflight_proxima_tentativa = {}
 
 
 def _tentar_reservar_coletor(coletor_id: str) -> bool:
@@ -279,6 +287,15 @@ def _executar_varredura_preflight_externo(settings):
             if num_doc in _external_preflight_aprovados:
                 continue
 
+            agora = time.monotonic()
+            proxima_tentativa = _external_preflight_proxima_tentativa.get(
+                num_doc,
+                0,
+            )
+
+            if agora < proxima_tentativa:
+                continue
+
             try:
                 resultado = automatic_external_posting(num_doc)
 
@@ -292,6 +309,28 @@ def _executar_varredura_preflight_externo(settings):
 
                 if resultado.status in ("POSTED", "ALREADY_POSTED"):
                     _external_preflight_aprovados.add(num_doc)
+                    _external_preflight_proxima_tentativa.pop(
+                        num_doc,
+                        None,
+                    )
+
+                elif resultado.status == "SIMULATION_ERROR":
+                    # Erro de negócio: saldo insuficiente,
+                    # produto/localização inexistente etc.
+                    # Não consulta a fonte externa a cada 10 segundos,
+                    # mas mantém recuperação automática.
+                    _external_preflight_proxima_tentativa[num_doc] = (
+                        time.monotonic()
+                        + _EXTERNAL_BUSINESS_RETRY_SEC
+                    )
+
+                else:
+                    # Erros técnicos/temporários continuam no ciclo normal
+                    # de 10 segundos: CONNECTION_ERROR, ROLLBACK, ERROR etc.
+                    _external_preflight_proxima_tentativa.pop(
+                        num_doc,
+                        None,
+                    )
 
             except Exception as e:
                 logging.exception(
@@ -966,7 +1005,9 @@ def _process_file_impl(file_path: str, settings):
                 )
 
         if (
-            comp_logconf.erros > 0
+            comp_logconf.novos > 0
+            or comp_logconf.erros > 0
+            or comp_prodconf.novos > 0
             or comp_prodconf.erros > 0
         ):
             logging.error(
