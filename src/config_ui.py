@@ -18,13 +18,16 @@ from decimal import Decimal, InvalidOperation
 from .runtime_status import read_runtime_status
 import re
 
+try:
+    from .build_info import APP_VERSION, BUILD_DATE
+except Exception:
+    APP_VERSION = "DESENVOLVIMENTO"
+    BUILD_DATE = "DESENVOLVIMENTO"
+
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
     BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-
-APP_VERSION = "1.0.2"
-BUILD_DATE = "28/08/2026 20:30"
 
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
 EXAMPLE_PATH = os.path.join(BASE_DIR, "config.ini.example")

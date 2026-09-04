@@ -21,7 +21,7 @@ APP_NAME = "ImportFilesLogConf"
 try:
     from .build_info import APP_VERSION, BUILD_DATE
 except Exception:
-    APP_VERSION = "1.0.2"
+    APP_VERSION = "DESENVOLVIMENTO"
     BUILD_DATE = "DESENVOLVIMENTO"
 
 VERSION_TEXT = f"Versão {APP_VERSION} | Build {BUILD_DATE}"
