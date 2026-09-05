@@ -47,6 +47,7 @@ _retry_sql_em_execucao = False
 # A verificação e o reprocessamento continuam funcionando normalmente.
 _banco_estado_lock = threading.Lock()
 _ultimo_estado_banco = None
+_nflog_erp_lock = threading.Lock()
 
 # ============================================================
 # ETAPA 7C REVISADA - VARREDURA PERIODICA DO BANCO LOCAL
@@ -482,6 +483,51 @@ def process_txt(file_path: str, settings, coletor_id: str | None = None):
             pass
 
         raise
+
+def _entrada_erp(settings) -> str:
+    return os.path.join(
+        os.path.dirname(os.path.normpath(settings.watch.input_dir)),
+        "entrada_erp",
+    )
+
+
+def _processar_nflog_erp(file_path: str, settings):
+    with _nflog_erp_lock:
+        if not os.path.isfile(file_path):
+            return
+
+        info = identificar_arquivo(file_path)
+        if info is None or info.tipo != "nflog" or info.confirmado:
+            return
+
+        try:
+            if not wait_file_stable(file_path):
+                raise RuntimeError("NFLOG do ERP não estabilizou.")
+            process_txt(file_path, settings, coletor_id=info.coletor_id)
+
+            destino = os.path.join(settings.watch.input_dir, info.nome_arquivo)
+            if os.path.exists(destino):
+                raise FileExistsError("NFLOG ainda existe na entrada do coletor.")
+
+            shutil.move(file_path, destino)
+            logging.info(
+                f"[NFLOG ERP LIBERADO] Coletor={info.coletor_id} | "
+                f"Arquivo={info.nome_arquivo} | Destino={destino}"
+            )
+        except Exception as e:
+            logging.warning(
+                f"[NFLOG ERP PENDENTE] Arquivo={info.nome_arquivo} | Motivo={e}"
+            )
+
+
+def _processar_entrada_erp(settings):
+    entrada_erp = _entrada_erp(settings)
+    ensure_dirs(entrada_erp)
+    for nome in sorted(os.listdir(entrada_erp)):
+        caminho = os.path.join(entrada_erp, nome)
+        if os.path.isfile(caminho):
+            _processar_nflog_erp(caminho, settings)
+
 
 def _process_file_impl(file_path: str, settings):
     fmt = settings.app.input_format
@@ -1142,6 +1188,9 @@ def process_file(file_path: str, settings):
     """
     settings = load_settings()
 
+    if os.path.normcase(os.path.abspath(os.path.dirname(file_path))) == os.path.normcase(os.path.abspath(_entrada_erp(settings))):
+        return _processar_nflog_erp(file_path, settings)
+
     ext = os.path.splitext(file_path)[1].lower()
     info = identificar_arquivo(file_path)
 
@@ -1509,8 +1558,11 @@ def main():
         settings.logging.level,
     )
 
+    entrada_erp = _entrada_erp(settings)
+
     ensure_dirs(
         settings.watch.input_dir,
+        entrada_erp,
         settings.watch.processed_dir,
         settings.watch.error_dir,
         settings.watch.duplicate_dir,
@@ -1524,6 +1576,7 @@ def main():
     )
 
     process_existing(settings)
+    _processar_entrada_erp(settings)
 
     handler = Handler(settings)
 
@@ -1534,6 +1587,7 @@ def main():
         settings.watch.input_dir,
         recursive=False,
     )
+    observer.schedule(handler, entrada_erp, recursive=False)
 
     observer.start()
 
@@ -1552,6 +1606,7 @@ def main():
                 proxima_tentativa_sql = agora + _RETRY_SQL_INTERVAL_SEC
                 try:
                     settings_atualizados = load_settings()
+                    _processar_entrada_erp(settings_atualizados)
                     if _reiniciar_conferencias_se_necessario(settings_atualizados):
                         process_existing(settings_atualizados)
                     else:

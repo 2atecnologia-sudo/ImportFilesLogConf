@@ -433,8 +433,10 @@ def _update_logconf_status_lanca(
     0 = Pendente
     1 = Lançado com sucesso
     2 = Não lançado / problema
+    3 = Estoque não configurado
 
-    MotivoEstoque recebe somente um texto amigável quando StatusLanca = 2.
+    MotivoEstoque recebe um texto amigável para os estados que exigem
+    identificação do motivo no Dashboard/Kalipso.
 
     Esta atualização é não-crítica:
     qualquer falha aqui é registrada no log técnico e NÃO interfere
@@ -661,7 +663,8 @@ def _record_external_status(
             conn.commit()
 
             # Atualiza também o resumo exibido pelo looper/Kalipso.
-            # StatusLanca: 0=Pendente, 1=Lançado, 2=Não lançado/problema.
+            # StatusLanca: 0=Pendente, 1=Lançado, 2=Não lançado/problema,
+            # 3=Estoque não configurado.
             if status == "LANCADO":
                 _update_logconf_status_lanca(
                     num_doc=num_doc,
@@ -681,6 +684,13 @@ def _record_external_status(
                     num_doc=num_doc,
                     status_lanca="0",
                     motivo="",
+                    config_path=config_path,
+                )
+            elif status == "ESTOQUE_NAO_CONFIGURADO":
+                _update_logconf_status_lanca(
+                    num_doc=num_doc,
+                    status_lanca="3",
+                    motivo="Banco de estoque não configurado",
                     config_path=config_path,
                 )
 
@@ -1544,6 +1554,23 @@ def automatic_external_preflight(
 
     conn_test = test_external_connection(config_path)
 
+    if conn_test.status == "CONNECTION_OK" and conn_test.items == 0:
+        message = (
+            "O banco de estoque está vazio e ainda não foi configurado/carregado. "
+            "Nenhum lançamento de estoque será realizado."
+        )
+        logging.info(
+            f"[FONTE EXTERNA][PREFLIGHT][ESTOQUE VAZIO] "
+            f"Documento={num_doc} | Banco={source.database} | "
+            f"Tabela={source.schema}.{source.table} | Registros=0"
+        )
+        return ExternalSyncResult(
+            "EMPTY_STOCK",
+            num_doc,
+            message,
+            0,
+        )
+
     if conn_test.status != "CONNECTION_OK":
         logging.error(
             f"[FONTE EXTERNA][PREFLIGHT][CONEXAO] "
@@ -1702,6 +1729,106 @@ def automatic_external_posting(
 
     source = load_external_data_source(config_path)
 
+    if not source.configured:
+        message = (
+            "Nenhuma Fonte de Dados Externa de estoque está configurada. "
+            "O documento foi conferido normalmente, mas não haverá lançamento de estoque."
+        )
+
+        logging.info(
+            f"[FONTE EXTERNA][ESTOQUE NAO CONFIGURADO] "
+            f"Documento={num_doc} | Nenhum lançamento de estoque será realizado."
+        )
+
+        _record_external_status(
+            num_doc=num_doc,
+            status="ESTOQUE_NAO_CONFIGURADO",
+            motivo="ESTOQUE_NAO_CONFIGURADO",
+            mensagem=message,
+            itens=0,
+            config_path=config_path,
+        )
+
+        _write_user_log(
+            level="INFO",
+            title="Estoque não configurado",
+            num_doc=num_doc,
+            why=(
+                "Nenhuma Fonte de Dados Externa de estoque está configurada "
+                "para realizar o lançamento deste documento."
+            ),
+            what_to_do=(
+                "Nenhuma ação necessária. Configure uma Fonte de Dados Externa "
+                "somente se desejar utilizar o lançamento de estoque."
+            ),
+            detail="StatusLanca=3 - ESTOQUE_NAO_CONFIGURADO.",
+            config_path=config_path,
+        )
+
+        return ExternalSyncResult(
+            "ESTOQUE_NAO_CONFIGURADO",
+            num_doc,
+            message,
+            0,
+        )
+
+    # STATUS3_EMPTY_STOCK_FIX_20260905
+    # Regra operacional:
+    # conexão configurada + tabela de estoque existente + 0 registros
+    # significa que o banco de estoque ainda não foi configurado/carregado.
+    # Nesse cenário não há erro de produto/localização e não se executa
+    # a validação item a item.
+    stock_check = test_external_connection(config_path)
+
+    if stock_check.status == "CONNECTION_OK" and int(stock_check.items or 0) == 0:
+        message = (
+            "O banco de estoque está vazio e ainda não foi configurado/carregado. "
+            "Nenhum lançamento de estoque será realizado."
+        )
+
+        logging.info(
+            f"[FONTE EXTERNA][ESTOQUE NAO CONFIGURADO] "
+            f"Documento={num_doc} | Banco={source.database} | "
+            f"Tabela={source.schema}.{source.table} | Registros=0 | StatusLanca=3"
+        )
+
+        _record_external_status(
+            num_doc=num_doc,
+            status="ESTOQUE_NAO_CONFIGURADO",
+            motivo="ESTOQUE_NAO_CONFIGURADO",
+            mensagem=message,
+            itens=0,
+            fonte_externa=source.name,
+            banco_externo=source.database,
+            config_path=config_path,
+        )
+
+        _write_user_log(
+            level="INFO",
+            title="Banco de estoque não configurado",
+            num_doc=num_doc,
+            why=(
+                "A Fonte de Dados Externa está configurada, porém a tabela de estoque "
+                "está vazia e ainda não foi carregada/configurada."
+            ),
+            what_to_do=(
+                "Nenhuma ação necessária caso o controle de estoque externo não seja utilizado. "
+                "Se desejar utilizar o recurso, carregue/configure o estoque."
+            ),
+            detail=(
+                f"Banco={source.database}; Tabela={source.schema}.{source.table}; "
+                "Registros=0; StatusLanca=3."
+            ),
+            config_path=config_path,
+        )
+
+        return ExternalSyncResult(
+            "ESTOQUE_NAO_CONFIGURADO",
+            num_doc,
+            message,
+            0,
+        )
+
     _record_external_status(
         num_doc=num_doc,
         status="EM_VALIDACAO",
@@ -1715,6 +1842,51 @@ def automatic_external_posting(
     )
 
     preflight = automatic_external_preflight(num_doc, config_path)
+
+    if preflight.status == "EMPTY_STOCK":
+        message = (
+            "O banco de estoque está vazio e ainda não foi configurado/carregado. "
+            "Nenhum lançamento de estoque será realizado."
+        )
+
+        logging.info(
+            f"[FONTE EXTERNA][ESTOQUE NAO CONFIGURADO] "
+            f"Documento={num_doc} | Banco de estoque vazio | StatusLanca=3"
+        )
+
+        _record_external_status(
+            num_doc=num_doc,
+            status="ESTOQUE_NAO_CONFIGURADO",
+            motivo="ESTOQUE_NAO_CONFIGURADO",
+            mensagem=message,
+            itens=0,
+            fonte_externa=source.name,
+            banco_externo=source.database,
+            config_path=config_path,
+        )
+
+        _write_user_log(
+            level="INFO",
+            title="Banco de estoque não configurado",
+            num_doc=num_doc,
+            why=(
+                "O banco de estoque está vazio e ainda não foi configurado/carregado "
+                "para realizar o lançamento deste documento."
+            ),
+            what_to_do=(
+                "Nenhuma ação necessária caso o controle de estoque externo não seja utilizado. "
+                "Se desejar utilizar o recurso, carregue/configure o estoque."
+            ),
+            detail="StatusLanca=3 - ESTOQUE_NAO_CONFIGURADO.",
+            config_path=config_path,
+        )
+
+        return ExternalSyncResult(
+            "ESTOQUE_NAO_CONFIGURADO",
+            num_doc,
+            message,
+            0,
+        )
 
     if preflight.status != "READY_TO_POST":
         motivo_map = {

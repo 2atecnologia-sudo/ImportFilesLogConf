@@ -63,7 +63,7 @@ def _consolidar_logconf(registros):
                 "hora_ini": _hora_normalizada(reg.hora_ini),
                 "user_fim": "",
                 "hora_fim": "",
-                "status": "ANDAMENTO",
+                "status": "EM ANDAMENTO",
             }
 
         if _texto(reg.status).upper() == "CONFERIDO":
