@@ -43,6 +43,11 @@ _RETRY_SQL_INTERVAL_SEC = 30
 _retry_sql_lock = threading.Lock()
 _retry_sql_em_execucao = False
 
+# Evita repetir no log o mesmo estado de banco a cada verificação periódica.
+# A verificação e o reprocessamento continuam funcionando normalmente.
+_banco_estado_lock = threading.Lock()
+_ultimo_estado_banco = None
+
 # ============================================================
 # ETAPA 7C REVISADA - VARREDURA PERIODICA DO BANCO LOCAL
 # Gatilho: PRODCONF todo zerado + LOGCONF CONFERIDO.
@@ -1258,6 +1263,7 @@ class Handler(FileSystemEventHandler):
 
 def _reiniciar_conferencias_se_necessario(settings):
     """Detecta banco vazio/inconsistente e prepara reconstrução pelo NFLOG."""
+    global _ultimo_estado_banco
     conn = get_connection(settings.sql)
     try:
         qtd_logconf, qtd_prodconf, precisa_reconstruir = normalize_empty_conference_tables(conn)
@@ -1274,7 +1280,21 @@ def _reiniciar_conferencias_se_necessario(settings):
             pass
 
     if not precisa_reconstruir:
+        with _banco_estado_lock:
+            _ultimo_estado_banco = None
         return False
+
+    estado_atual = (
+        "VAZIO" if qtd_logconf == 0 and qtd_prodconf == 0 else "INCONSISTENTE",
+        qtd_logconf,
+        qtd_prodconf,
+    )
+    with _banco_estado_lock:
+        registrar_estado = _ultimo_estado_banco != estado_atual
+        _ultimo_estado_banco = estado_atual
+
+    if not registrar_estado:
+        return True
 
     if qtd_logconf == 0 and qtd_prodconf == 0:
         logging.warning(

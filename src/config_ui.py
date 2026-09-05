@@ -1447,14 +1447,9 @@ class ConfigUI(tk.Tk):
                 parent=self,
             )
 
-            # A limpeza dos logs é opcional e independente do reset.
-            if messagebox.askyesno(
-                "Apagar Logs?",
-                "O Ambiente de Testes foi resetado com sucesso.\n\n"
-                "Deseja apagar também o Log do Usuário e o Log Técnico?",
-                parent=self,
-            ):
-                self._clear_logs_after_test_reset()
+            # O reset do ambiente de testes também inicia um histórico limpo.
+            # Não remove arquivos físicos da pasta de entrada.
+            self._clear_logs_after_test_reset()
 
         except Exception as e:
             if estoque_conn is not None:
@@ -3461,7 +3456,7 @@ class ConfigUI(tk.Tk):
             pass
 
     def _clear_logs_after_test_reset(self):
-        """Limpa somente os logs quando o usuário optar por isso após o reset."""
+        """Limpa os logs após o reset do Ambiente de Testes."""
         log_dir = self.cfg.get(
             "logging", "log_dir", fallback=r"C:\MIS\logs"
         ).strip() or r"C:\MIS\logs"
@@ -3488,7 +3483,7 @@ class ConfigUI(tk.Tk):
             self._write_test_user_log(
                 "OK",
                 "AMBIENTE DE TESTES RESETADO E LOGS LIMPOS",
-                "O usuário optou por apagar os logs após resetar o Ambiente de Testes.",
+                "Os logs foram limpos após resetar o Ambiente de Testes.",
                 "Configurações, conexões e pastas foram preservadas.",
                 [f"Arquivos de log limpos: {cleared}"],
             )
@@ -4462,7 +4457,7 @@ class ConfigUI(tk.Tk):
             "Ambiente de Testes": (
                 "AMBIENTE DE TESTES\n\n"
                 "Área isolada para validar entradas e movimentações de estoque sem utilizar o estoque real do ERP.\n\n"
-                "• Resetar Ambiente: limpa os dados de teste e prepara um novo cenário. Após o reset, pergunta se deseja apagar também os logs.\n"
+                "• Resetar Ambiente: limpa os dados de teste e prepara um novo cenário. O reset também limpa os logs para iniciar um novo cenário.\n"
                 "• Carregar Banco de Exemplo: restaura o estoque de exemplo.\n"
                 "• Importar Estoque: carrega um TXT/CSV de estoque.\n"
                 "• Importar 1 ou vários XMLs: realiza entradas de estoque por NF-e.\n"
@@ -5918,7 +5913,7 @@ class ConfigUI(tk.Tk):
             elif msg.startswith("[NFLOG SQL JA IMPORTADO]"):
                 tipo, status = "NFLOG", "JÁ IMPORTADO"
             elif msg.startswith("[NFLOG AGUARDANDO OK]"):
-                tipo, status = "NFLOG", "AGUARDANDO .OK"
+                tipo, status = "NFLOG", "AGUARDANDO IMPORTAÇÃO PELO COLETOR"
             elif msg.startswith("[NFLOG CONFIRMADO]"):
                 tipo, status = "NFLOG", "CONFIRMADO"
             elif msg.startswith("[NFLOG ARQUIVADO]"):
