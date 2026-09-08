@@ -5,6 +5,7 @@ import time
 import shutil
 import logging
 import threading
+import hashlib
 from logging.handlers import RotatingFileHandler
 
 
@@ -491,6 +492,62 @@ def _entrada_erp(settings) -> str:
     )
 
 
+def _sha256_arquivo(path: str) -> str:
+    hash_obj = hashlib.sha256()
+    with open(path, "rb") as arquivo:
+        for bloco in iter(lambda: arquivo.read(1024 * 1024), b""):
+            hash_obj.update(bloco)
+    return hash_obj.hexdigest()
+
+
+def _nflog_erp_conteudo_ja_enviado(file_path: str, settings, info) -> bool:
+    """
+    Considera duplicado somente o MESMO NFLOG (mesmo nome/coletor)
+    com conteúdo byte a byte idêntico.
+
+    Um arquivo de mesmo nome com conteúdo diferente é uma nova carga
+    válida e deve continuar no fluxo normal.
+    """
+    hash_entrada = _sha256_arquivo(file_path)
+
+    # 1) O NFLOG anterior ainda está aguardando o coletor em C:\MIS\entrada.
+    destino_atual = os.path.join(settings.watch.input_dir, info.nome_arquivo)
+    if os.path.isfile(destino_atual):
+        if _sha256_arquivo(destino_atual) == hash_entrada:
+            return True
+
+    # 2) O NFLOG anterior já foi confirmado (.ok) e arquivado em processados/nflog.
+    nflog_processados_dir = os.path.join(settings.watch.processed_dir, "nflog")
+    if not os.path.isdir(nflog_processados_dir):
+        return False
+
+    nome_base = os.path.splitext(info.nome_arquivo)[0]
+    prefixo_historico = f"{nome_base}_".lower()
+
+    for nome in os.listdir(nflog_processados_dir):
+        caminho = os.path.join(nflog_processados_dir, nome)
+        if not os.path.isfile(caminho):
+            continue
+        if not nome.lower().startswith(prefixo_historico):
+            continue
+        try:
+            if _sha256_arquivo(caminho) == hash_entrada:
+                return True
+        except OSError:
+            continue
+
+    return False
+
+
+def _arquivar_nflog_erp_duplicado(file_path: str, settings, info):
+    destino = safe_move(file_path, settings.watch.duplicate_dir)
+    logging.warning(
+        f"[NFLOG ERP DUPLICADO IGNORADO] Coletor={info.coletor_id} | "
+        f"Arquivo={info.nome_arquivo} | Conteudo identico a NFLOG ja enviado | "
+        f"Destino={destino}"
+    )
+
+
 def _processar_nflog_erp(file_path: str, settings):
     with _nflog_erp_lock:
         if not os.path.isfile(file_path):
@@ -503,11 +560,22 @@ def _processar_nflog_erp(file_path: str, settings):
         try:
             if not wait_file_stable(file_path):
                 raise RuntimeError("NFLOG do ERP não estabilizou.")
-            process_txt(file_path, settings, coletor_id=info.coletor_id)
+
+            # Proteção ANTES de qualquer alteração no SQL.
+            # Mesmo nome + mesmo conteúdo = duplicado real.
+            # Mesmo nome + conteúdo diferente = nova carga válida.
+            if _nflog_erp_conteudo_ja_enviado(file_path, settings, info):
+                _arquivar_nflog_erp_duplicado(file_path, settings, info)
+                return
 
             destino = os.path.join(settings.watch.input_dir, info.nome_arquivo)
             if os.path.exists(destino):
-                raise FileExistsError("NFLOG ainda existe na entrada do coletor.")
+                raise FileExistsError(
+                    "NFLOG anterior ainda existe na entrada do coletor; "
+                    "nova carga diferente aguardará sem tocar no SQL."
+                )
+
+            process_txt(file_path, settings, coletor_id=info.coletor_id)
 
             shutil.move(file_path, destino)
             logging.info(

@@ -60,6 +60,8 @@ def _consolidar_logconf(registros):
             consolidados[num_nf] = {
                 "num_nf": num_nf,
                 "user_ini": _texto(reg.user_ini),
+                "data_conf": reg.data_conf,
+                "data_hora": reg.data_hora,
                 "hora_ini": _hora_normalizada(reg.hora_ini),
                 "user_fim": "",
                 "hora_fim": "",
@@ -70,6 +72,7 @@ def _consolidar_logconf(registros):
             consolidados[num_nf]["user_fim"] = _texto(reg.user_fim)
             consolidados[num_nf]["hora_fim"] = _hora_normalizada(reg.hora_fim)
             consolidados[num_nf]["status"] = "CONFERIDO"
+            consolidados[num_nf]["data_hora"] = reg.data_hora
 
     return list(consolidados.values())
 
@@ -553,6 +556,8 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf, colet
                        UserFimConf = ?,
                        HoraIniConf = ?,
                        HoraFimConf = ?,
+                       DataConf = ?,
+                       DataeHora = ?,
                        StatusConf = ?,
                        ColetorID = ?
                  WHERE NumNF = ?
@@ -562,6 +567,8 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf, colet
                     item["user_fim"] or None,
                     _valor_hora_para_sql(item["hora_ini"], tipo_hora_ini),
                     _valor_hora_para_sql(item["hora_fim"], tipo_hora_fim),
+                    item["data_conf"],
+                    item["data_hora"],
                     item["status"],
                     _texto(coletor_id) or None,
                     int(item["num_nf"]),

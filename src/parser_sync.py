@@ -27,6 +27,8 @@ class LogConfRegistro:
     hora_ini: str
     hora_fim: str
     status: str
+    data_conf: str
+    data_hora: object
 
 
 @dataclass
@@ -202,13 +204,13 @@ def parse_logconf(path: str) -> ResultadoArquivo:
 
     separador = _detectar_separador(
         linhas_com_conteudo,
-        campos_esperados=6
+        campos_esperados=8
     )
 
     if separador is None:
         resultado.erro_estrutural = (
             "Não foi possível identificar o separador "
-            "ou o arquivo não possui o layout de 6 campos."
+            "ou o arquivo não possui o layout de 8 campos."
         )
         return resultado
 
@@ -236,7 +238,7 @@ def parse_logconf(path: str) -> ResultadoArquivo:
             for p in linha.split(separador)
         ]
 
-        if len(partes) != 6:
+        if len(partes) != 8:
 
             resultado.erros.append(
                 ErroRegistro(
@@ -245,7 +247,7 @@ def parse_logconf(path: str) -> ResultadoArquivo:
                     conteudo=linha_original,
                     motivo=(
                         f"Quantidade de campos inválida. "
-                        f"Esperado=6, recebido={len(partes)}."
+                        f"Esperado=8, recebido={len(partes)}."
                     )
                 )
             )
@@ -256,10 +258,12 @@ def parse_logconf(path: str) -> ResultadoArquivo:
         (
             num_nf,
             user_ini,
+            data_conf,
             user_fim,
             hora_ini,
             hora_fim,
             status,
+            data_hora_raw,
         ) = partes
 
         if not _validar_numero_inteiro(num_nf):
@@ -275,6 +279,23 @@ def parse_logconf(path: str) -> ResultadoArquivo:
 
             resultado.registros_invalidos += 1
             continue
+
+        data_hora = None
+
+        if data_hora_raw:
+            try:
+                data_hora = datetime.strptime(data_hora_raw, "%Y%m%d%H%M%S%f")
+            except ValueError:
+                resultado.erros.append(
+                    ErroRegistro(
+                        arquivo=path,
+                        linha=numero_linha,
+                        conteudo=linha_original,
+                        motivo="DataeHora inválida. Esperado AAAAMMDDHHMMSSmmm."
+                    )
+                )
+                resultado.registros_invalidos += 1
+                continue
 
         if not status:
 
@@ -298,6 +319,8 @@ def parse_logconf(path: str) -> ResultadoArquivo:
             hora_ini=hora_ini,
             hora_fim=hora_fim,
             status=status,
+            data_conf=data_conf,
+            data_hora=data_hora,
         )
 
         resultado.registros.append(registro)
