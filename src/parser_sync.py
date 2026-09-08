@@ -27,7 +27,7 @@ class LogConfRegistro:
     hora_ini: str
     hora_fim: str
     status: str
-    data_conf: str
+    data_conf: object
     data_hora: object
 
 
@@ -178,6 +178,63 @@ def _decimal(valor: str) -> Decimal:
         )
 
 
+def _data_logconf(valor: str):
+    """
+    Converte DataConf aceitando os dois formatos encontrados nos coletores:
+      AAAAMMDD
+      DDMMAAAA
+
+    Retorna datetime.date ou None.
+    """
+    valor = (valor or "").strip()
+
+    if valor == "":
+        return None
+
+    if len(valor) != 8 or not valor.isdigit():
+        raise ValueError
+
+    formatos = ("%Y%m%d", "%d%m%Y")
+
+    for formato in formatos:
+        try:
+            return datetime.strptime(valor, formato).date()
+        except ValueError:
+            pass
+
+    raise ValueError
+
+
+def _data_hora_logconf(valor: str):
+    """
+    Converte DataeHora aceitando os dois formatos encontrados nos coletores:
+      AAAAMMDDHHMMSSmmm
+      DDMMAAAAHHMMSSmmm
+
+    Os dígitos finais são tratados como fração de segundo.
+    Retorna datetime ou None.
+    """
+    valor = (valor or "").strip()
+
+    if valor == "":
+        return None
+
+    if len(valor) < 14 or not valor.isdigit():
+        raise ValueError
+
+    # datetime.strptime com %f aceita de 1 a 6 dígitos de fração.
+    # O formato atual do coletor usa 3 dígitos (milissegundos).
+    formatos = ("%Y%m%d%H%M%S%f", "%d%m%Y%H%M%S%f")
+
+    for formato in formatos:
+        try:
+            return datetime.strptime(valor, formato)
+        except ValueError:
+            pass
+
+    raise ValueError
+
+
 # ============================================================
 # LOGCONF
 # ============================================================
@@ -258,7 +315,7 @@ def parse_logconf(path: str) -> ResultadoArquivo:
         (
             num_nf,
             user_ini,
-            data_conf,
+            data_conf_raw,
             user_fim,
             hora_ini,
             hora_fim,
@@ -280,18 +337,40 @@ def parse_logconf(path: str) -> ResultadoArquivo:
             resultado.registros_invalidos += 1
             continue
 
-        data_hora = None
-
-        if data_hora_raw:
+        data_conf = None
+        if data_conf_raw:
             try:
-                data_hora = datetime.strptime(data_hora_raw, "%Y%m%d%H%M%S%f")
+                data_conf = _data_logconf(data_conf_raw)
             except ValueError:
                 resultado.erros.append(
                     ErroRegistro(
                         arquivo=path,
                         linha=numero_linha,
                         conteudo=linha_original,
-                        motivo="DataeHora inválida. Esperado AAAAMMDDHHMMSSmmm."
+                        motivo=(
+                            "DataConf inválida. "
+                            "Esperado AAAAMMDD ou DDMMAAAA."
+                        )
+                    )
+                )
+                resultado.registros_invalidos += 1
+                continue
+
+        data_hora = None
+
+        if data_hora_raw:
+            try:
+                data_hora = _data_hora_logconf(data_hora_raw)
+            except ValueError:
+                resultado.erros.append(
+                    ErroRegistro(
+                        arquivo=path,
+                        linha=numero_linha,
+                        conteudo=linha_original,
+                        motivo=(
+                            "DataeHora inválida. "
+                            "Esperado AAAAMMDDHHMMSSmmm ou DDMMAAAAHHMMSSmmm."
+                        )
                     )
                 )
                 resultado.registros_invalidos += 1
@@ -496,6 +575,7 @@ def parse_prodconf(path: str) -> ResultadoArquivo:
         resultado.registros_validos += 1
 
     return resultado
+
 
 # ============================================================
 # SCANOCOR

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
@@ -72,6 +72,7 @@ def _consolidar_logconf(registros):
             consolidados[num_nf]["user_fim"] = _texto(reg.user_fim)
             consolidados[num_nf]["hora_fim"] = _hora_normalizada(reg.hora_fim)
             consolidados[num_nf]["status"] = "CONFERIDO"
+            consolidados[num_nf]["data_conf"] = reg.data_conf
             consolidados[num_nf]["data_hora"] = reg.data_hora
 
     return list(consolidados.values())
@@ -549,6 +550,17 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf, colet
                 )
 
         for item in logconf:
+            logging.info(
+                "[SYNC][DEBUG LOGCONF SQL] "
+                f"NumNF={item['num_nf']} | "
+                f"UserIni={item['user_ini']!r}({type(item['user_ini']).__name__}) | "
+                f"UserFim={item['user_fim']!r}({type(item['user_fim']).__name__}) | "
+                f"HoraIni={item['hora_ini']!r}({type(item['hora_ini']).__name__}) | "
+                f"HoraFim={item['hora_fim']!r}({type(item['hora_fim']).__name__}) | "
+                f"DataConf={item['data_conf']!r}({type(item['data_conf']).__name__}) | "
+                f"DataeHora={item['data_hora']!r}({type(item['data_hora']).__name__}) | "
+                f"Status={item['status']!r}"
+            )
             cur.execute(
                 """
                 UPDATE dbo.logConf
@@ -585,6 +597,19 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf, colet
 
         for reg in registros_prodconf:
             rows = _buscar_prodconf(cur, reg, lock=True)
+
+            logging.info(
+                "[SYNC][DEBUG PRODCONF SQL] "
+                f"Linha={reg.linha} | "
+                f"NumDoc={reg.num_doc!r}({type(reg.num_doc).__name__}) | "
+                f"EAN={reg.ean!r}({type(reg.ean).__name__}) | "
+                f"CodProd={reg.cod_prod!r}({type(reg.cod_prod).__name__}) | "
+                f"QtdeLido={reg.qtde_lido!r}({type(reg.qtde_lido).__name__}) | "
+                f"Saldo={reg.saldo!r}({type(reg.saldo).__name__}) | "
+                f"Localizacao={reg.localizacao!r}({type(reg.localizacao).__name__}) | "
+                f"Status={reg.status!r} | "
+                f"Acao={'INSERT' if len(rows) == 0 else 'UPDATE' if len(rows) == 1 else 'AMBIGUA'}"
+            )
 
             if len(rows) == 0:
                 _insert_prodconf(cur, reg, coletor_id)

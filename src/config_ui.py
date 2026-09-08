@@ -1421,6 +1421,22 @@ class ConfigUI(tk.Tk):
             estoque_conn.commit()
             local_conn.commit()
 
+            # RESET = novo ciclo também para o NFLOG.
+            # A proteção normal contra duplicidade continua inalterada.
+            # Apagamos somente o histórico de NFLOG processado que é usado
+            # para reconhecer uma carga idêntica de um ciclo anterior.
+            processed_dir = self.cfg.get(
+                "watch",
+                "processed_dir",
+                fallback=r"C:\MIS\processados",
+            ).strip()
+            nflog_processados_dir = os.path.join(processed_dir, "nflog")
+
+            if os.path.isdir(nflog_processados_dir):
+                shutil.rmtree(nflog_processados_dir)
+
+            os.makedirs(nflog_processados_dir, exist_ok=True)
+
             self._write_test_user_log(
                 "OK",
                 "RESET DO AMBIENTE DE TESTES",
