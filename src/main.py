@@ -485,10 +485,10 @@ def process_txt(file_path: str, settings, coletor_id: str | None = None):
 
         raise
 
-def _entrada_erp(settings) -> str:
+def _entrada_txt(settings) -> str:
     return os.path.join(
         os.path.dirname(os.path.normpath(settings.watch.input_dir)),
-        "entrada_erp",
+        "entrada_txt",
     )
 
 
@@ -588,11 +588,11 @@ def _processar_nflog_erp(file_path: str, settings):
             )
 
 
-def _processar_entrada_erp(settings):
-    entrada_erp = _entrada_erp(settings)
-    ensure_dirs(entrada_erp)
-    for nome in sorted(os.listdir(entrada_erp)):
-        caminho = os.path.join(entrada_erp, nome)
+def _processar_entrada_txt(settings):
+    entrada_txt = _entrada_txt(settings)
+    ensure_dirs(entrada_txt)
+    for nome in sorted(os.listdir(entrada_txt)):
+        caminho = os.path.join(entrada_txt, nome)
         if os.path.isfile(caminho):
             _processar_nflog_erp(caminho, settings)
 
@@ -1256,7 +1256,7 @@ def process_file(file_path: str, settings):
     """
     settings = load_settings()
 
-    if os.path.normcase(os.path.abspath(os.path.dirname(file_path))) == os.path.normcase(os.path.abspath(_entrada_erp(settings))):
+    if os.path.normcase(os.path.abspath(os.path.dirname(file_path))) == os.path.normcase(os.path.abspath(_entrada_txt(settings))):
         return _processar_nflog_erp(file_path, settings)
 
     ext = os.path.splitext(file_path)[1].lower()
@@ -1626,11 +1626,11 @@ def main():
         settings.logging.level,
     )
 
-    entrada_erp = _entrada_erp(settings)
+    entrada_txt = _entrada_txt(settings)
 
     ensure_dirs(
         settings.watch.input_dir,
-        entrada_erp,
+        entrada_txt,
         settings.watch.processed_dir,
         settings.watch.error_dir,
         settings.watch.duplicate_dir,
@@ -1644,7 +1644,7 @@ def main():
     )
 
     process_existing(settings)
-    _processar_entrada_erp(settings)
+    _processar_entrada_txt(settings)
 
     handler = Handler(settings)
 
@@ -1655,7 +1655,7 @@ def main():
         settings.watch.input_dir,
         recursive=False,
     )
-    observer.schedule(handler, entrada_erp, recursive=False)
+    observer.schedule(handler, entrada_txt, recursive=False)
 
     observer.start()
 
@@ -1674,7 +1674,7 @@ def main():
                 proxima_tentativa_sql = agora + _RETRY_SQL_INTERVAL_SEC
                 try:
                     settings_atualizados = load_settings()
-                    _processar_entrada_erp(settings_atualizados)
+                    _processar_entrada_txt(settings_atualizados)
                     if _reiniciar_conferencias_se_necessario(settings_atualizados):
                         process_existing(settings_atualizados)
                     else:
