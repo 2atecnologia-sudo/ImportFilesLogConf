@@ -203,6 +203,24 @@ def normalize_empty_conference_tables(conn) -> tuple[int, int, bool]:
         return qtd_logconf, qtd_prodconf, True
 
     if qtd_logconf > 0 and qtd_prodconf == 0:
+        # Cabeçalhos originados de XML podem existir legitimamente sem prodConf
+        # até que um coletor inicie a conferência. Se houver ao menos um
+        # cabeçalho ainda livre (ColetorID vazio), preserva o estado.
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT COUNT(*)
+            FROM dbo.logConf
+            WHERE ColetorID IS NULL
+               OR LTRIM(RTRIM(CAST(ColetorID AS VARCHAR(100)))) = ''
+            """
+        )
+        qtd_cabecalhos_livres = int(cur.fetchone()[0] or 0)
+
+        if qtd_cabecalhos_livres > 0:
+            return qtd_logconf, qtd_prodconf, False
+
+        # Mantém exatamente a normalização anterior para os demais casos.
         conn.cursor().execute("DELETE FROM dbo.logConf")
         conn.commit()
         return qtd_logconf, qtd_prodconf, True

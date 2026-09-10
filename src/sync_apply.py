@@ -501,7 +501,7 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf, colet
         for item in logconf:
             cur.execute(
                 """
-                SELECT NumNF, UserIniConf, UserFimConf, HoraIniConf, HoraFimConf, StatusConf
+                SELECT NumNF, UserIniConf, UserFimConf, HoraIniConf, HoraFimConf, StatusConf, ColetorID
                 FROM dbo.logConf WITH (UPDLOCK, HOLDLOCK)
                 WHERE NumNF = ?
                 """,
@@ -513,6 +513,20 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf, colet
                 raise SyncWriteError(
                     f"LOGCONF NumNF={item['num_nf']}: encontrados={len(rows)}; esperado=0 ou 1."
                 )
+
+            # Regra de posse da NF:
+            # - ColetorID vazio: o primeiro coletor que sincronizar assume a NF.
+            # - ColetorID já preenchido: somente o mesmo coletor pode continuar.
+            # O UPDLOCK/HOLDLOCK acima torna a decisão atômica dentro da transação.
+            if len(rows) == 1:
+                coletor_atual = _texto(getattr(rows[0], "ColetorID", ""))
+                coletor_recebido = _texto(coletor_id)
+
+                if coletor_atual and coletor_recebido and coletor_atual != coletor_recebido:
+                    raise SyncWriteError(
+                        f"LOGCONF NumNF={item['num_nf']}: NF já atribuída ao coletor "
+                        f"{coletor_atual}; sincronização do coletor {coletor_recebido} recusada."
+                    )
 
             if len(rows) == 0:
                 # Documento novo vindo no arquivo acumulado do coletor.
@@ -550,17 +564,6 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf, colet
                 )
 
         for item in logconf:
-            logging.info(
-                "[SYNC][DEBUG LOGCONF SQL] "
-                f"NumNF={item['num_nf']} | "
-                f"UserIni={item['user_ini']!r}({type(item['user_ini']).__name__}) | "
-                f"UserFim={item['user_fim']!r}({type(item['user_fim']).__name__}) | "
-                f"HoraIni={item['hora_ini']!r}({type(item['hora_ini']).__name__}) | "
-                f"HoraFim={item['hora_fim']!r}({type(item['hora_fim']).__name__}) | "
-                f"DataConf={item['data_conf']!r}({type(item['data_conf']).__name__}) | "
-                f"DataeHora={item['data_hora']!r}({type(item['data_hora']).__name__}) | "
-                f"Status={item['status']!r}"
-            )
             cur.execute(
                 """
                 UPDATE dbo.logConf
@@ -597,19 +600,6 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf, colet
 
         for reg in registros_prodconf:
             rows = _buscar_prodconf(cur, reg, lock=True)
-
-            logging.info(
-                "[SYNC][DEBUG PRODCONF SQL] "
-                f"Linha={reg.linha} | "
-                f"NumDoc={reg.num_doc!r}({type(reg.num_doc).__name__}) | "
-                f"EAN={reg.ean!r}({type(reg.ean).__name__}) | "
-                f"CodProd={reg.cod_prod!r}({type(reg.cod_prod).__name__}) | "
-                f"QtdeLido={reg.qtde_lido!r}({type(reg.qtde_lido).__name__}) | "
-                f"Saldo={reg.saldo!r}({type(reg.saldo).__name__}) | "
-                f"Localizacao={reg.localizacao!r}({type(reg.localizacao).__name__}) | "
-                f"Status={reg.status!r} | "
-                f"Acao={'INSERT' if len(rows) == 0 else 'UPDATE' if len(rows) == 1 else 'AMBIGUA'}"
-            )
 
             if len(rows) == 0:
                 _insert_prodconf(cur, reg, coletor_id)

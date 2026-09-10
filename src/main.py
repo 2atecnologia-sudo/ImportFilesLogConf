@@ -24,6 +24,12 @@ from .sql_diagnostics import diagnosticar_erro_sql
 from .runtime_status import write_runtime_status
 from .single_instance import SingleInstance
 from .user_log import registrar_evento_usuario
+from .xml_header_importer import (
+    entrada_xml_dir,
+    processar_xml_entrada,
+    processar_pasta_xml,
+    arquivar_xmls_em_andamento,
+)
 
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -1256,6 +1262,9 @@ def process_file(file_path: str, settings):
     """
     settings = load_settings()
 
+    if os.path.normcase(os.path.abspath(os.path.dirname(file_path))) == os.path.normcase(os.path.abspath(entrada_xml_dir(settings))):
+        return processar_xml_entrada(file_path, settings)
+
     if os.path.normcase(os.path.abspath(os.path.dirname(file_path))) == os.path.normcase(os.path.abspath(_entrada_txt(settings))):
         return _processar_nflog_erp(file_path, settings)
 
@@ -1627,10 +1636,12 @@ def main():
     )
 
     entrada_txt = _entrada_txt(settings)
+    entrada_xml = entrada_xml_dir(settings)
 
     ensure_dirs(
         settings.watch.input_dir,
         entrada_txt,
+        entrada_xml,
         settings.watch.processed_dir,
         settings.watch.error_dir,
         settings.watch.duplicate_dir,
@@ -1645,6 +1656,8 @@ def main():
 
     process_existing(settings)
     _processar_entrada_txt(settings)
+    processar_pasta_xml(settings)
+    arquivar_xmls_em_andamento(settings)
 
     handler = Handler(settings)
 
@@ -1656,11 +1669,13 @@ def main():
         recursive=False,
     )
     observer.schedule(handler, entrada_txt, recursive=False)
+    observer.schedule(handler, entrada_xml, recursive=False)
 
     observer.start()
 
     try:
         proxima_tentativa_sql = time.monotonic() + _RETRY_SQL_INTERVAL_SEC
+        proxima_verificacao_xml_assumido = time.monotonic() + 5
         proximo_preflight_externo = (
             time.monotonic() + _EXTERNAL_PREFLIGHT_INTERVAL_SEC
         )
@@ -1670,11 +1685,19 @@ def main():
 
             agora = time.monotonic()
 
+            if agora >= proxima_verificacao_xml_assumido:
+                proxima_verificacao_xml_assumido = agora + 5
+                try:
+                    arquivar_xmls_em_andamento(load_settings())
+                except Exception as e:
+                    logging.exception(f"[XML][ERRO NA VERIFICACAO DE STATUS] {e}")
+
             if agora >= proxima_tentativa_sql:
                 proxima_tentativa_sql = agora + _RETRY_SQL_INTERVAL_SEC
                 try:
                     settings_atualizados = load_settings()
                     _processar_entrada_txt(settings_atualizados)
+                    processar_pasta_xml(settings_atualizados)
                     if _reiniciar_conferencias_se_necessario(settings_atualizados):
                         process_existing(settings_atualizados)
                     else:
