@@ -99,7 +99,7 @@ def insert_logconf_header(conn, num_nf: str, nome_cli: str, status_conf: str = "
     cur.execute(sql, (num_nf_db, str(nome_cli)[:80], status_conf, str(coletor_id or "")[:100]))
 
 
-def insert_prodconf_items(conn, num_doc: str, nome_cli: str, itens: list[dict], status_inicial: str, coletor_id: str | None = None):
+def insert_prodconf_items(conn, num_doc: str, nome_cli: str, itens: list[dict], status_inicial: str, coletor_id: str | None = None, commit: bool = True):
     """
     Insere cabeçalho em dbo.logConf (NumNF, NomeCli, StatusConf="AGUARDANDO")
     e itens em dbo.prodConf.
@@ -178,7 +178,8 @@ def insert_prodconf_items(conn, num_doc: str, nome_cli: str, itens: list[dict], 
 
         cur.execute(sql, tuple(valores))
 
-    conn.commit()
+    if commit:
+        conn.commit()
 
 def get_conference_table_counts(conn) -> tuple[int, int]:
     """Retorna (qtd_logconf, qtd_prodconf)."""

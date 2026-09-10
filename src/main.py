@@ -25,7 +25,8 @@ from .runtime_status import write_runtime_status
 from .single_instance import SingleInstance
 from .user_log import registrar_evento_usuario
 from .xml_header_importer import (
-    entrada_xml_dir,
+    entrada_xml_rec_dir,
+    entrada_xml_exp_dir,
     processar_xml_entrada,
     processar_pasta_xml,
     arquivar_xmls_em_andamento,
@@ -1262,10 +1263,15 @@ def process_file(file_path: str, settings):
     """
     settings = load_settings()
 
-    if os.path.normcase(os.path.abspath(os.path.dirname(file_path))) == os.path.normcase(os.path.abspath(entrada_xml_dir(settings))):
-        return processar_xml_entrada(file_path, settings)
+    pasta_arquivo = os.path.normcase(os.path.abspath(os.path.dirname(file_path)))
 
-    if os.path.normcase(os.path.abspath(os.path.dirname(file_path))) == os.path.normcase(os.path.abspath(_entrada_txt(settings))):
+    if pasta_arquivo == os.path.normcase(os.path.abspath(entrada_xml_rec_dir(settings))):
+        return processar_xml_entrada(file_path, settings, "REC")
+
+    if pasta_arquivo == os.path.normcase(os.path.abspath(entrada_xml_exp_dir(settings))):
+        return processar_xml_entrada(file_path, settings, "EXP")
+
+    if pasta_arquivo == os.path.normcase(os.path.abspath(_entrada_txt(settings))):
         return _processar_nflog_erp(file_path, settings)
 
     ext = os.path.splitext(file_path)[1].lower()
@@ -1636,12 +1642,14 @@ def main():
     )
 
     entrada_txt = _entrada_txt(settings)
-    entrada_xml = entrada_xml_dir(settings)
+    entrada_xml_rec = entrada_xml_rec_dir(settings)
+    entrada_xml_exp = entrada_xml_exp_dir(settings)
 
     ensure_dirs(
         settings.watch.input_dir,
         entrada_txt,
-        entrada_xml,
+        entrada_xml_rec,
+        entrada_xml_exp,
         settings.watch.processed_dir,
         settings.watch.error_dir,
         settings.watch.duplicate_dir,
@@ -1669,7 +1677,8 @@ def main():
         recursive=False,
     )
     observer.schedule(handler, entrada_txt, recursive=False)
-    observer.schedule(handler, entrada_xml, recursive=False)
+    observer.schedule(handler, entrada_xml_rec, recursive=False)
+    observer.schedule(handler, entrada_xml_exp, recursive=False)
 
     observer.start()
 
