@@ -13,6 +13,20 @@ class SyncWriteError(RuntimeError):
     """Erro de consistência/gravação da sincronização."""
 
 
+class SyncConflictError(SyncWriteError):
+    """Conflito de posse: a NF já pertence a outro coletor."""
+
+    def __init__(self, num_nf: str, coletor_atual: str, coletor_recebido: str):
+        self.num_nf = _texto(num_nf)
+        self.coletor_atual = _texto(coletor_atual)
+        self.coletor_recebido = _texto(coletor_recebido)
+        super().__init__(
+            f"LOGCONF NumNF={self.num_nf}: NF já atribuída ao coletor "
+            f"{self.coletor_atual}; sincronização do coletor "
+            f"{self.coletor_recebido} recusada."
+        )
+
+
 @dataclass
 class ResultadoGravacao:
     logconf_atualizados: int = 0
@@ -25,6 +39,84 @@ def _texto(valor) -> str:
     if valor is None:
         return ""
     return str(valor).strip()
+
+
+def _registrar_resposta_sync_conflito(settings, erro: SyncConflictError) -> None:
+    """
+    Registra, em transação separada, o aviso destinado ao coletor recusado.
+
+    A gravação acontece somente depois do rollback da sincronização principal.
+    Para evitar avisos repetidos durante reprocessamentos, mantém no máximo um
+    aviso não lido por ColetorID + NumNF + Tipo.
+    """
+    conn_resposta = None
+
+    try:
+        conn_resposta = get_connection(settings.sql)
+        cur = conn_resposta.cursor()
+
+        tipo = "CONFLITO_CONFERENCIA"
+        mensagem = (
+            f"NF {erro.num_nf} não sincronizada. Conferência já atribuída "
+            f"ao terminal {erro.coletor_atual}."
+        )
+
+        cur.execute(
+            """
+            SELECT TOP 1 ID
+            FROM dbo.RespostasSync WITH (UPDLOCK, HOLDLOCK)
+            WHERE ColetorID = ?
+              AND NumNF = ?
+              AND Tipo = ?
+              AND Lido = 0
+            ORDER BY ID DESC
+            """,
+            (
+                erro.coletor_recebido,
+                erro.num_nf,
+                tipo,
+            ),
+        )
+
+        if cur.fetchone() is None:
+            cur.execute(
+                """
+                INSERT INTO dbo.RespostasSync
+                    (ColetorID, NumNF, Tipo, Mensagem, Lido)
+                VALUES (?, ?, ?, ?, 0)
+                """,
+                (
+                    erro.coletor_recebido,
+                    erro.num_nf,
+                    tipo,
+                    mensagem,
+                ),
+            )
+
+        conn_resposta.commit()
+
+    except Exception as e:
+        if conn_resposta is not None:
+            try:
+                conn_resposta.rollback()
+            except Exception:
+                pass
+
+        # Falha ao registrar a resposta nunca pode substituir o conflito
+        # original nem alterar o comportamento da sincronização.
+        logging.error(
+            f"[RESPOSTA SYNC][ERRO] "
+            f"Coletor={erro.coletor_recebido} | "
+            f"NumNF={erro.num_nf} | "
+            f"Motivo={e}"
+        )
+
+    finally:
+        if conn_resposta is not None:
+            try:
+                conn_resposta.close()
+            except Exception:
+                pass
 
 
 def _hora_normalizada(valor) -> str:
@@ -498,6 +590,12 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf, colet
         tipo_hora_ini = _tipo_coluna(conn, "dbo.logConf", "HoraIniConf")
         tipo_hora_fim = _tipo_coluna(conn, "dbo.logConf", "HoraFimConf")
 
+        # Uma sincronização pode conter várias NFs. Conflito de posse de uma NF
+        # não deve mais cancelar o lote inteiro: a NF conflitante é isolada,
+        # recebe uma RespostaSync própria e as demais continuam normalmente.
+        conflitos = []
+        nfs_conflitantes = set()
+
         for item in logconf:
             cur.execute(
                 """
@@ -517,16 +615,29 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf, colet
             # Regra de posse da NF:
             # - ColetorID vazio: o primeiro coletor que sincronizar assume a NF.
             # - ColetorID já preenchido: somente o mesmo coletor pode continuar.
+            # - Se houver conflito, somente essa NF é recusada; o restante do lote continua.
             # O UPDLOCK/HOLDLOCK acima torna a decisão atômica dentro da transação.
             if len(rows) == 1:
                 coletor_atual = _texto(getattr(rows[0], "ColetorID", ""))
                 coletor_recebido = _texto(coletor_id)
 
                 if coletor_atual and coletor_recebido and coletor_atual != coletor_recebido:
-                    raise SyncWriteError(
-                        f"LOGCONF NumNF={item['num_nf']}: NF já atribuída ao coletor "
-                        f"{coletor_atual}; sincronização do coletor {coletor_recebido} recusada."
+                    erro_conflito = SyncConflictError(
+                        item["num_nf"],
+                        coletor_atual,
+                        coletor_recebido,
                     )
+                    conflitos.append(erro_conflito)
+                    nfs_conflitantes.add(_texto(item["num_nf"]))
+
+                    logging.warning(
+                        f"[SYNC][CONFLITO POSSE] "
+                        f"Coletor={coletor_recebido} | "
+                        f"NumNF={item['num_nf']} | "
+                        f"PertenceAoColetor={coletor_atual} | "
+                        f"NF recusada; demais NFs do lote continuam."
+                    )
+                    continue
 
             if len(rows) == 0:
                 # Documento novo vindo no arquivo acumulado do coletor.
@@ -554,7 +665,19 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf, colet
                     f"[SYNC][LOGCONF][NOVO INSERIDO] NumNF={item['num_nf']}"
                 )
 
-        for reg in registros_prodconf:
+        # Tudo relacionado às NFs conflitantes fica fora da gravação principal.
+        logconf_validos = [
+            item
+            for item in logconf
+            if _texto(item["num_nf"]) not in nfs_conflitantes
+        ]
+        prodconf_validos = [
+            reg
+            for reg in registros_prodconf
+            if _texto(reg.num_doc) not in nfs_conflitantes
+        ]
+
+        for reg in prodconf_validos:
             rows = _buscar_prodconf(cur, reg, lock=True)
 
             if len(rows) > 1:
@@ -563,7 +686,7 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf, colet
                     f"encontrados={len(rows)}; esperado=0 ou 1."
                 )
 
-        for item in logconf:
+        for item in logconf_validos:
             cur.execute(
                 """
                 UPDATE dbo.logConf
@@ -598,7 +721,7 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf, colet
 
             resultado.logconf_atualizados += 1
 
-        for reg in registros_prodconf:
+        for reg in prodconf_validos:
             rows = _buscar_prodconf(cur, reg, lock=True)
 
             if len(rows) == 0:
@@ -613,7 +736,7 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf, colet
 
             resultado.prodconf_atualizados += 1
 
-        for item in logconf:
+        for item in logconf_validos:
             cur.execute(
                 """
                 SELECT UserIniConf, UserFimConf, HoraIniConf, HoraFimConf, StatusConf
@@ -645,7 +768,7 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf, colet
                     f"Esperado={esperado!r} Obtido={obtido!r}"
                 )
 
-        for reg in registros_prodconf:
+        for reg in prodconf_validos:
             rows = _buscar_prodconf(cur, reg, lock=False)
 
             if len(rows) != 1:
@@ -677,7 +800,22 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf, colet
 
         conn.commit()
 
-        for item in logconf:
+        # Respostas de conflito são gravadas somente após o commit/rollback da
+        # transação principal e em conexão separada. A função já impede mais
+        # de uma resposta NÃO LIDA para ColetorID + NumNF + Tipo.
+        for erro_conflito in conflitos:
+            _registrar_resposta_sync_conflito(settings, erro_conflito)
+
+        if conflitos:
+            logging.warning(
+                f"[SYNC][CONFLITOS TRATADOS] "
+                f"Coletor={_texto(coletor_id)} | "
+                f"Quantidade={len(conflitos)} | "
+                f"NFs={','.join(erro.num_nf for erro in conflitos)} | "
+                f"Demais NFs do lote processadas normalmente."
+            )
+
+        for item in logconf_validos:
             _gerar_arquivo_individual_se_concluido(
                 conn,
                 settings,
@@ -695,6 +833,7 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf, colet
 
     finally:
         conn.close()
+
 
 def aplicar_scanocor(settings, registros_scanocor, coletor_id: str) -> ResultadoGravacao:
     """

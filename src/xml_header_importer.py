@@ -11,6 +11,24 @@ from .db import get_connection, insert_logconf_header, insert_prodconf_items, nu
 from .parser_xml import parse_nfe_xml
 
 
+# XMLs já publicados e inalterados nesta execução.
+# A varredura pode reencontrá-los, mas não deve reprocessar nem gerar novos logs.
+_xml_publicados = {}
+
+
+def _assinatura_xml(path: str):
+    try:
+        stat = os.stat(path)
+        return (stat.st_size, stat.st_mtime_ns)
+    except (FileNotFoundError, OSError):
+        return None
+
+
+def _tipo_operacao_log(tipo_operacao: str) -> str:
+    return "RECEBIMENTO" if tipo_operacao == "REC" else "EXPEDIÇÃO"
+
+
+
 def entrada_xml_rec_dir(settings) -> str:
     """Pasta de XMLs de recebimento; cabeçalho usa o emitente."""
     return os.path.join(os.path.dirname(os.path.normpath(settings.watch.input_dir)), "entrada_xmlRec")
@@ -175,43 +193,90 @@ def _consolidar_xml_para_coletor(origem: str, destino: str) -> tuple[int, int]:
 
 def processar_xml_entrada(file_path: str, settings, tipo_operacao: str) -> None:
     """
-    Cria somente o cabeçalho e mantém o XML consolidado na própria pasta REC/EXP
-    para que todos os coletores possam importá-lo enquanto a NF estiver livre.
+    Processa o XML antes de publicá-lo ao coletor.
+
+    Regra importante: enquanto o XML estiver sendo validado/consolidado, ele fica
+    com sufixo .processing e, portanto, não aparece ao Kalipso como arquivo .xml.
+    Somente após o processamento terminar com sucesso o XML consolidado volta a ser
+    publicado com sua extensão .xml original.
     """
     if not os.path.isfile(file_path) or os.path.splitext(file_path)[1].lower() != ".xml":
         return
+
+    chave_xml = os.path.normcase(os.path.abspath(file_path))
+    assinatura_atual = _assinatura_xml(file_path)
+    if assinatura_atual is not None and _xml_publicados.get(chave_xml) == assinatura_atual:
+        return
+
     if not _wait_file_stable(file_path):
         raise RuntimeError("XML não estabilizou (cópia incompleta?).")
 
-    doc = parse_nfe_xml(file_path, group_items=False)
-    numdoc = str(doc["NumDoc"]).strip()
-    nomecli = _nome_cabecalho_xml(file_path, tipo_operacao)
     nome_arquivo = os.path.basename(file_path)
-
     tmp_operacional = file_path + ".tmp"
     tmp_original = file_path + ".processing"
-    for p in (tmp_operacional, tmp_original):
-        if os.path.exists(p):
-            os.remove(p)
 
-    conn = get_connection(settings.sql)
-    original_em_processamento = False
+    # Enquanto estiver em processamento, o arquivo não pode ficar visível ao
+    # coletor como .xml. A publicação só ocorre no final, após sucesso completo.
+    if os.path.exists(tmp_operacional):
+        os.remove(tmp_operacional)
+    if os.path.exists(tmp_original):
+        raise RuntimeError(
+            f"Já existe processamento pendente para {nome_arquivo}: "
+            f"{os.path.basename(tmp_original)}"
+        )
+
+    os.replace(file_path, tmp_original)
+    processo_log = _tipo_operacao_log(tipo_operacao)
+    logging.info(
+        f"[XML {processo_log}] Arquivo={nome_arquivo} | Arquivo recebido | Processando"
+    )
+
+    conn = None
+    publicado = False
     try:
+        doc = parse_nfe_xml(tmp_original, group_items=False)
+        numdoc = str(doc["NumDoc"]).strip()
+        nomecli = _nome_cabecalho_xml(tmp_original, tipo_operacao)
+
+        conn = get_connection(settings.sql)
+
         if numdoc_exists(conn, numdoc):
             conn.rollback()
+
+            # A NF já existe no SQL, portanto NÃO inserimos logConf/prodConf novamente.
+            # Mesmo assim, o XML disponível ao coletor precisa continuar obedecendo
+            # à regra operacional atual: itens repetidos pelo mesmo cProd devem ser
+            # consolidados antes de o Kalipso importá-lo.
+            grupos, removidos = _consolidar_xml_para_coletor(
+                tmp_original,
+                tmp_operacional,
+            )
+
+            # Só aqui o XML volta a ficar visível ao coletor.
+            os.replace(tmp_operacional, file_path)
+            publicado = True
+
+            if os.path.exists(tmp_original):
+                os.remove(tmp_original)
+
+            assinatura_publicada = _assinatura_xml(file_path)
+            if assinatura_publicada is not None:
+                _xml_publicados[chave_xml] = assinatura_publicada
+
             logging.info(
-                f"[XML JÁ CADASTRADO] NumNF={numdoc} | Tipo={tipo_operacao} | "
-                f"Arquivo={nome_arquivo} | XML permanece disponível aos coletores."
+                f"[XML {processo_log}] NF={numdoc} | Arquivo={nome_arquivo} | "
+                f"Disponível para os coletores | "
+                f"GruposDuplicados={grupos} | LinhasConsolidadas={removidos}"
             )
             return
 
-        grupos, removidos = _consolidar_xml_para_coletor(file_path, tmp_operacional)
+        grupos, removidos = _consolidar_xml_para_coletor(tmp_original, tmp_operacional)
 
         if tipo_operacao == "REC":
             # Recebimento: o prodConf deve refletir exatamente o XML operacional.
             # Se houver cProd duplicado, a consolidação acima soma qCom e remove
-            # somente as repetições. Se não houver duplicidade, o XML permanece
-            # funcionalmente igual e os itens seguem normalmente.
+            # somente as repetições. Se não houver duplicidade, os itens seguem
+            # normalmente sem alteração funcional.
             doc_consolidado = parse_nfe_xml(tmp_operacional, group_items=False)
             insert_prodconf_items(
                 conn,
@@ -232,37 +297,42 @@ def processar_xml_entrada(file_path: str, settings, tipo_operacao: str) -> None:
                 coletor_id=None,
             )
 
-        os.replace(file_path, tmp_original)
-        original_em_processamento = True
-        os.replace(tmp_operacional, file_path)
+        # Primeiro confirma o SQL. Somente depois o XML consolidado é publicado
+        # novamente com extensão .xml para os coletores.
         conn.commit()
+        os.replace(tmp_operacional, file_path)
+        publicado = True
 
         if os.path.exists(tmp_original):
             os.remove(tmp_original)
-        original_em_processamento = False
+
+        assinatura_publicada = _assinatura_xml(file_path)
+        if assinatura_publicada is not None:
+            _xml_publicados[chave_xml] = assinatura_publicada
 
         logging.info(
-            f"[XML DISPONÍVEL AOS COLETORES] NumNF={numdoc} | Tipo={tipo_operacao} | "
-            f"Cliente={nomecli} | Arquivo={nome_arquivo} | Pasta={os.path.dirname(file_path)} | "
+            f"[XML {processo_log}] NF={numdoc} | Arquivo={nome_arquivo} | "
+            f"Disponível para os coletores | "
             f"GruposDuplicados={grupos} | LinhasConsolidadas={removidos}"
         )
     except Exception:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        if original_em_processamento and os.path.exists(tmp_original):
+        if conn is not None:
             try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-                os.replace(tmp_original, file_path)
-            except Exception:
-                logging.exception(f"[XML][ERRO AO RESTAURAR XML] Arquivo={tmp_original}")
-        if os.path.exists(tmp_operacional):
-            try:
-                os.remove(tmp_operacional)
+                conn.rollback()
             except Exception:
                 pass
+
+        # Segurança: em caso de falha, não republicamos o XML original. Ele
+        # permanece como .processing e, portanto, não fica disponível ao coletor.
+        if publicado and os.path.exists(file_path):
+            logging.exception(
+                f"[XML][ERRO APÓS PUBLICAÇÃO] Arquivo={file_path}"
+            )
+        else:
+            logging.exception(
+                f"[XML][PROCESSAMENTO PENDENTE] Arquivo={tmp_original} | "
+                f"XML não liberado aos coletores."
+            )
         raise
     finally:
         if os.path.exists(tmp_operacional):
@@ -270,10 +340,11 @@ def processar_xml_entrada(file_path: str, settings, tipo_operacao: str) -> None:
                 os.remove(tmp_operacional)
             except Exception:
                 pass
-        try:
-            conn.close()
-        except Exception:
-            pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 def processados_xml_rec_dir(settings) -> str:
     return os.path.join(settings.watch.processed_dir, "xmlRec")
@@ -319,9 +390,10 @@ def _arquivar_xmls_da_pasta(settings, pasta_entrada: str, pasta_processados: str
                 if not coletor_id or status not in {"EM ANDAMENTO", "CONFERIDO"}:
                     continue
                 destino = _safe_move(caminho, pasta_processados)
+                processo_log = _tipo_operacao_log(tipo_operacao)
                 logging.info(
-                    f"[XML ARQUIVADO] NumNF={numdoc} | Tipo={tipo_operacao} | "
-                    f"StatusConf={status} | ColetorID={coletor_id} | Origem={caminho} | Destino={destino}"
+                    f"[CONFERÊNCIA] NF={numdoc} | Processo={processo_log} | "
+                    f"Importada pelo coletor {coletor_id} | XML arquivado"
                 )
             except Exception as e:
                 logging.warning(

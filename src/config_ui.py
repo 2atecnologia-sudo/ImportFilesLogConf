@@ -16,6 +16,8 @@ from PIL import Image, ImageTk
 from decimal import Decimal, InvalidOperation
 
 from .runtime_status import read_runtime_status
+from .settings import load_settings
+from .xml_header_importer import processar_pasta_xml
 import re
 
 try:
@@ -1373,7 +1375,8 @@ class ConfigUI(tk.Tk):
             "• movimentações;\n"
             "• logConf;\n"
             "• prodConf;\n"
-            "• erros de conferência.\n\n"
+            "• erros de conferência;\n"
+            "• respostas/avisos de sincronização.\n\n"
             "Configurações SQL, rede, ERP, usuário, senha e pastas serão preservadas.\n\n"
             "Deseja continuar?",
             parent=self,
@@ -1412,7 +1415,7 @@ class ConfigUI(tk.Tk):
             lc = local_conn.cursor()
 
             limpas = []
-            for tabela in ("LancamentoExternoStatus", "scanerroconf", "prodConf", "logConf"):
+            for tabela in ("LancamentoExternoStatus", "scanerroconf", "RespostasSync", "prodConf", "logConf"):
                 lc.execute("SELECT OBJECT_ID(?, 'U')", (f"dbo.{tabela}",))
                 if lc.fetchone()[0] is not None:
                     lc.execute(f"DELETE FROM dbo.[{tabela}]")
@@ -1420,6 +1423,41 @@ class ConfigUI(tk.Tk):
 
             estoque_conn.commit()
             local_conn.commit()
+
+            # RESET = ambiente realmente limpo para um novo cenário de teste.
+            # Limpa somente as pastas de ENTRADA usadas pelo aplicativo;
+            # as próprias pastas são preservadas e nada de processados/logs é removido aqui.
+            input_dir = self.cfg.get(
+                "watch",
+                "input_dir",
+                fallback=r"C:\MIS\entrada",
+            ).strip()
+            input_base_dir = os.path.dirname(os.path.normpath(input_dir))
+            pastas_entrada = (
+                input_dir,
+                os.path.join(input_base_dir, "entrada_txt"),
+                os.path.join(input_base_dir, "entrada_xmlRec"),
+                os.path.join(input_base_dir, "entrada_xmlExp"),
+            )
+
+            arquivos_entrada_removidos = 0
+            pastas_entrada_limpas = []
+            pastas_vistas = set()
+            for pasta_entrada in pastas_entrada:
+                pasta_normalizada = os.path.normcase(os.path.abspath(pasta_entrada))
+                if pasta_normalizada in pastas_vistas:
+                    continue
+                pastas_vistas.add(pasta_normalizada)
+
+                os.makedirs(pasta_entrada, exist_ok=True)
+                for nome in os.listdir(pasta_entrada):
+                    caminho = os.path.join(pasta_entrada, nome)
+                    if os.path.isdir(caminho) and not os.path.islink(caminho):
+                        shutil.rmtree(caminho)
+                    else:
+                        os.remove(caminho)
+                    arquivos_entrada_removidos += 1
+                pastas_entrada_limpas.append(pasta_entrada)
 
             # RESET = novo ciclo também para o NFLOG.
             # A proteção normal contra duplicidade continua inalterada.
@@ -1440,11 +1478,12 @@ class ConfigUI(tk.Tk):
             self._write_test_user_log(
                 "OK",
                 "RESET DO AMBIENTE DE TESTES",
-                "Estoque, movimentações, conferências e erros foram eliminados.",
+                "Estoque, movimentações, conferências, erros, respostas de sincronização e arquivos de entrada foram eliminados.",
                 "Importe um arquivo de estoque ou carregue o Banco de Exemplo para iniciar um novo teste.",
                 [
                     "Configurações SQL/rede/ERP preservadas.",
                     "Tabelas locais limpas: " + (", ".join(limpas) if limpas else "nenhuma encontrada"),
+                    f"Itens removidos das pastas de entrada: {arquivos_entrada_removidos}",
                 ],
             )
 
@@ -1464,7 +1503,8 @@ class ConfigUI(tk.Tk):
             )
 
             # O reset do ambiente de testes também inicia um histórico limpo.
-            # Não remove arquivos físicos da pasta de entrada.
+            # As pastas de entrada já foram esvaziadas acima para evitar que
+            # arquivos antigos recriem dados ou contaminem o próximo teste.
             self._clear_logs_after_test_reset()
 
         except Exception as e:
@@ -3388,6 +3428,14 @@ class ConfigUI(tk.Tk):
             ),
         ).pack(side="left")
 
+        self.file_auto_scroll_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            arquivos_top,
+            text="Rolagem automática",
+            variable=self.file_auto_scroll_var,
+            command=self._on_file_auto_scroll_changed,
+        ).pack(side="right")
+
         file_columns = ("hora", "arquivo", "tipo", "coletor", "status", "detalhe")
         self.file_events_tree = ttk.Treeview(
             self.tab_log_arquivos,
@@ -3425,6 +3473,24 @@ class ConfigUI(tk.Tk):
         self.tab_log_arquivos.grid_columnconfigure(0, weight=1)
 
         # ---- Log técnico ----
+        tech_log_controls = ttk.Frame(self.tab_log_tecnico)
+        tech_log_controls.grid(
+            row=0,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            padx=4,
+            pady=(4, 2),
+        )
+
+        self.tech_log_auto_scroll_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            tech_log_controls,
+            text="Rolagem automática",
+            variable=self.tech_log_auto_scroll_var,
+            command=self._on_tech_log_auto_scroll_changed,
+        ).pack(side="left")
+
         self.tech_log_text = tk.Text(
             self.tab_log_tecnico,
             wrap="none",
@@ -3447,10 +3513,10 @@ class ConfigUI(tk.Tk):
             xscrollcommand=tech_x.set,
         )
 
-        self.tech_log_text.grid(row=0, column=0, sticky="nsew")
-        tech_y.grid(row=0, column=1, sticky="ns")
-        tech_x.grid(row=1, column=0, sticky="ew")
-        self.tab_log_tecnico.grid_rowconfigure(0, weight=1)
+        self.tech_log_text.grid(row=1, column=0, sticky="nsew")
+        tech_y.grid(row=1, column=1, sticky="ns")
+        tech_x.grid(row=2, column=0, sticky="ew")
+        self.tab_log_tecnico.grid_rowconfigure(1, weight=1)
         self.tab_log_tecnico.grid_columnconfigure(0, weight=1)
 
         actions = ttk.Frame(self.tab_status)
@@ -3468,6 +3534,22 @@ class ConfigUI(tk.Tk):
         try:
             if self.log_auto_scroll_var.get():
                 self.log_text.see("1.0")
+        except Exception:
+            pass
+
+    def _on_file_auto_scroll_changed(self):
+        """Ao reativar a rolagem automática, volta ao arquivo mais recente."""
+        try:
+            if self.file_auto_scroll_var.get():
+                self.file_events_tree.yview_moveto(0.0)
+        except Exception:
+            pass
+
+    def _on_tech_log_auto_scroll_changed(self):
+        """Ao reativar a rolagem automática, volta ao evento técnico mais recente."""
+        try:
+            if self.tech_log_auto_scroll_var.get():
+                self.tech_log_text.see("1.0")
         except Exception:
             pass
 
@@ -5870,10 +5952,12 @@ class ConfigUI(tk.Tk):
 
     def _read_file_events(self, max_events=300):
         """
-        Extrai do importador.log uma visão operacional focada em arquivos.
+        Exibe uma auditoria operacional dos arquivos processados.
 
-        Não altera o log técnico nem o processamento. Apenas interpreta as
-        mensagens já gravadas para facilitar a operação diária.
+        Esta rotina altera SOMENTE a apresentação da aba Arquivos. O log técnico,
+        o monitoramento e as regras de processamento dos arquivos permanecem intactos.
+        Eventos intermediários/repetitivos são ocultados; fica o resultado útil mais
+        recente de cada arquivo/processo.
         """
         log_dir = self.cfg.get(
             "logging", "log_dir", fallback=os.path.join(BASE_DIR, "logs")
@@ -5889,8 +5973,8 @@ class ConfigUI(tk.Tk):
         except Exception:
             return []
 
-        eventos = []
-        # Ajuda a completar linhas como NFLOG SQL OK, que não repetem o Coletor.
+        # Mantém apenas o resultado operacional mais recente de cada arquivo/processo.
+        resultados = {}
         coletor_por_arquivo = {}
         tipo_por_arquivo = {}
 
@@ -5907,10 +5991,14 @@ class ConfigUI(tk.Tk):
             tipo = ""
             coletor = ""
             status = ""
+            detalhe = ""
 
             ma = re.search(r"Arquivo(?: recebido)?=([^|]+)", msg, re.IGNORECASE)
             if ma:
                 arquivo = os.path.basename(ma.group(1).strip())
+                # O XML pode aparecer temporariamente com .processing no log.
+                if arquivo.lower().endswith(".processing"):
+                    arquivo = arquivo[:-11]
 
             mc = re.search(r"Coletor=([^|]+)", msg, re.IGNORECASE)
             if mc:
@@ -5920,62 +6008,134 @@ class ConfigUI(tk.Tk):
             if mt:
                 tipo = mt.group(1).strip().upper()
 
-            if msg.startswith("[ARQUIVO]"):
-                status = "DETECTADO"
-            elif msg.startswith("[NFLOG RECEBIDO]"):
-                tipo, status = "NFLOG", "PROCESSANDO"
+            # Ruído operacional pertence ao Log Técnico, não à auditoria de Arquivos.
+            if (
+                msg.startswith("[MONITOR DE ARQUIVOS]")
+                or msg.startswith("[ARQUIVO]")
+                or msg.startswith("[NFLOG RECEBIDO]")
+                or msg.startswith("[NFLOG VARREDURA]") and "[ERRO]" not in msg
+            ):
+                continue
+
+            # XML: mostra somente o resultado final ou uma falha real.
+            if msg.startswith("[XML RECEBIMENTO]") or msg.startswith("[XML EXPEDIÇÃO]"):
+                tipo = "XML RECEBIMENTO" if msg.startswith("[XML RECEBIMENTO]") else "XML EXPEDIÇÃO"
+                if "Disponível para os coletores" not in msg and "ERRO" not in msg.upper():
+                    continue
+
+                mnf = re.search(r"(?:NF|NumNF)=([^|]+)", msg, re.IGNORECASE)
+                nf = mnf.group(1).strip() if mnf else ""
+                mg = re.search(r"GruposDuplicados=(\d+)", msg, re.IGNORECASE)
+                ml = re.search(r"LinhasConsolidadas=(\d+)", msg, re.IGNORECASE)
+                grupos = int(mg.group(1)) if mg else 0
+                linhas_consolidadas = int(ml.group(1)) if ml else 0
+
+                if "ERRO" in msg.upper():
+                    status = "ERRO"
+                    detalhe = msg
+                else:
+                    status = "OK"
+                    if tipo == "XML RECEBIMENTO":
+                        detalhe = "XML válido | logConf=OK | prodConf=OK"
+                    else:
+                        detalhe = "XML válido | logConf=OK"
+                    if nf:
+                        detalhe = f"NF={nf} | {detalhe}"
+                    if grupos > 0:
+                        detalhe += (
+                            f" | {grupos} código{'s' if grupos != 1 else ''} de produto repetido"
+                            f"{'s' if grupos != 1 else ''} | {linhas_consolidadas} linha"
+                            f"{'s' if linhas_consolidadas != 1 else ''} consolidada"
+                            f"{'s' if linhas_consolidadas != 1 else ''}"
+                        )
+                    else:
+                        detalhe += " | Sem produtos repetidos"
+                    detalhe += " | Disponível para os coletores"
+
+            elif msg.startswith("[CONFERÊNCIA]"):
+                tipo, status = "CONFERÊNCIA", "OK"
+                detalhe = msg.replace("[CONFERÊNCIA]", "", 1).strip(" |")
+
             elif msg.startswith("[NFLOG SQL OK]"):
-                tipo, status = "NFLOG", "IMPORTADO SQL"
+                tipo, status = "NFLOG", "OK"
+                detalhe = "Arquivo válido | Importado no SQL"
             elif msg.startswith("[NFLOG SQL JA IMPORTADO]"):
-                tipo, status = "NFLOG", "JÁ IMPORTADO"
+                tipo, status = "NFLOG", "OK"
+                detalhe = "Arquivo válido | Já importado anteriormente"
             elif msg.startswith("[NFLOG AGUARDANDO OK]"):
-                tipo, status = "NFLOG", "AGUARDANDO IMPORTAÇÃO PELO COLETOR"
+                tipo, status = "NFLOG", "PENDENTE"
+                detalhe = "Arquivo válido | Aguardando confirmação .ok do coletor"
             elif msg.startswith("[NFLOG CONFIRMADO]"):
-                tipo, status = "NFLOG", "CONFIRMADO"
+                tipo, status = "NFLOG", "OK"
+                detalhe = "Confirmado pelo coletor"
             elif msg.startswith("[NFLOG ARQUIVADO]"):
-                tipo, status = "NFLOG", "ARQUIVADO"
+                tipo, status = "NFLOG", "OK"
+                detalhe = "Processado e arquivado"
             elif msg.startswith("[NFLOG VARREDURA][ERRO]"):
-                tipo, status = "NFLOG", "ERRO"
-            elif msg.startswith("[NFLOG VARREDURA]"):
-                tipo, status = "NFLOG", "VARREDURA"
+                tipo, status, detalhe = "NFLOG", "ERRO", msg
+
             elif msg.startswith("[SCANOCOR"):
                 tipo = "SCANOCOR"
-                status = "ERRO" if "ERRO" in msg or "PENDENTE" in msg else "PROCESSADO"
+                status = "ERRO" if "ERRO" in msg.upper() or "PENDENTE" in msg.upper() else "OK"
+                detalhe = msg
+
             elif msg.startswith("[SYNC PENDENTE]"):
-                tipo, status = "LOG/PROD", "PENDENTE"
+                tipo, status, detalhe = "LOGCONF/PRODCONF", "PENDENTE", msg
             elif msg.startswith("[SYNC ABORTADA]") or msg.startswith("[SYNC][SQL PENDENTE]"):
-                tipo, status = "LOG/PROD", "ERRO"
+                tipo, status, detalhe = "LOGCONF/PRODCONF", "ERRO", msg
             elif msg.startswith("[SYNC ") or msg.startswith("[SYNC]"):
-                tipo, status = "LOG/PROD", "PROCESSADO"
+                # Só interessa o resultado concluído; mensagens intermediárias ficam no técnico.
+                if not any(p in msg.upper() for p in ("OK", "COMMIT", "PROCESSAD", "GRAVACAO", "GRAVAÇÃO")):
+                    continue
+                tipo, status, detalhe = "LOGCONF/PRODCONF", "OK", msg
+
             elif msg.startswith("[ARQUIVO IGNORADO]"):
                 status = "IGNORADO"
+                detalhe = msg
                 mi = re.search(r"padrão:\s*(.+)$", msg, re.IGNORECASE)
                 if mi:
                     arquivo = os.path.basename(mi.group(1).strip())
+
             elif msg.startswith("Erro processando ") or msg.startswith("Erro processando existente "):
-                status = "ERRO"
+                status, detalhe = "ERRO", msg
                 me = re.search(r"Erro processando(?: existente)? (.+?): (.+)$", msg)
                 if me:
                     arquivo = os.path.basename(me.group(1).strip())
-
-            # Somente mensagens relacionadas a arquivos entram nesta visão.
-            if not (arquivo or tipo or status):
+            else:
                 continue
 
             if arquivo:
+                chave_arq = arquivo.lower()
                 if coletor:
-                    coletor_por_arquivo[arquivo.lower()] = coletor
-                elif arquivo.lower() in coletor_por_arquivo:
-                    coletor = coletor_por_arquivo[arquivo.lower()]
+                    coletor_por_arquivo[chave_arq] = coletor
+                elif chave_arq in coletor_por_arquivo:
+                    coletor = coletor_por_arquivo[chave_arq]
 
                 if tipo:
-                    tipo_por_arquivo[arquivo.lower()] = tipo
-                elif arquivo.lower() in tipo_por_arquivo:
-                    tipo = tipo_por_arquivo[arquivo.lower()]
+                    tipo_por_arquivo[chave_arq] = tipo
+                elif chave_arq in tipo_por_arquivo:
+                    tipo = tipo_por_arquivo[chave_arq]
 
-            eventos.append((hora, arquivo or "-", tipo or "-", coletor or "-", status or "INFO", msg))
+            # Uma linha útil por arquivo. Quando não há nome de arquivo no evento,
+            # usa processo/coletor/NF para não misturar operações diferentes.
+            if arquivo:
+                chave = (tipo or "ARQUIVO", arquivo.lower())
+            else:
+                mnf = re.search(r"(?:NF|NumNF)=([^|]+)", msg, re.IGNORECASE)
+                nf = mnf.group(1).strip() if mnf else ""
+                chave = (tipo or "PROCESSO", coletor or "-", nf or msg)
 
-        eventos.reverse()
+            resultados[chave] = (
+                hora,
+                arquivo or "-",
+                tipo or "-",
+                coletor or "-",
+                status or "INFO",
+                detalhe or msg,
+            )
+
+        eventos = list(resultados.values())
+        eventos.sort(key=lambda item: item[0], reverse=True)
         return eventos[:max_events]
 
     def _last_result_from_log(self) -> str:
@@ -6049,16 +6209,99 @@ class ConfigUI(tk.Tk):
 
         # Atualiza a visão operacional de arquivos sem alterar os logs originais.
         if hasattr(self, "file_events_tree"):
+            # Quando a rolagem automática estiver desativada, preserva o
+            # registro que está no topo da área visível para que novos eventos
+            # não atrapalhem a leitura do operador.
+            try:
+                current_file_y = self.file_events_tree.yview()[0]
+            except Exception:
+                current_file_y = 0.0
+
+            current_file_anchor = None
+            try:
+                children_before = self.file_events_tree.get_children()
+                if children_before:
+                    # yview()[0] informa a fração vertical do primeiro item
+                    # visível. Usamos essa posição para descobrir qual registro
+                    # estava no topo antes de reconstruir a grade.
+                    top_index = min(
+                        len(children_before) - 1,
+                        max(0, int(current_file_y * len(children_before))),
+                    )
+                    top_item = children_before[top_index]
+                    current_file_anchor = tuple(
+                        self.file_events_tree.item(top_item, "values")
+                    )
+            except Exception:
+                current_file_anchor = None
+
             for item in self.file_events_tree.get_children():
                 self.file_events_tree.delete(item)
             for evento in self._read_file_events():
                 self.file_events_tree.insert("", "end", values=evento)
 
+            if (
+                not hasattr(self, "file_auto_scroll_var")
+                or self.file_auto_scroll_var.get()
+            ):
+                # Os eventos mais recentes ficam no topo da grade Arquivos.
+                self.file_events_tree.yview_moveto(0.0)
+            else:
+                # Tenta manter exatamente o mesmo registro visível. Se ele
+                # tiver saído da janela dos últimos eventos, mantém a posição.
+                restored = False
+                if current_file_anchor is not None:
+                    children = self.file_events_tree.get_children()
+                    for index, item in enumerate(children):
+                        if tuple(self.file_events_tree.item(item, "values")) == current_file_anchor:
+                            total = max(1, len(children))
+                            self.file_events_tree.yview_moveto(index / total)
+                            restored = True
+                            break
+                if not restored:
+                    self.file_events_tree.yview_moveto(current_file_y)
+
         technical_events = self._read_technical_events()
+
+        # Preserva a LINHA que está no topo quando a rolagem automática do
+        # Log Técnico estiver desativada. Como novos eventos entram no início
+        # do texto, guardar apenas a fração da barra faria a tela "andar".
+        current_tech_anchor = None
+        current_tech_y = 0.0
+        try:
+            current_tech_y = self.tech_log_text.yview()[0]
+            top_index = self.tech_log_text.index("@0,0")
+            current_tech_anchor = self.tech_log_text.get(
+                f"{top_index} linestart", f"{top_index} lineend"
+            )
+        except Exception:
+            pass
+
         self.tech_log_text.configure(state="normal")
         self.tech_log_text.delete("1.0", "end")
         self.tech_log_text.insert("1.0", "\n".join(technical_events))
-        self.tech_log_text.see("1.0")
+
+        if (
+            not hasattr(self, "tech_log_auto_scroll_var")
+            or self.tech_log_auto_scroll_var.get()
+        ):
+            self.tech_log_text.see("1.0")
+        else:
+            restored = False
+            if current_tech_anchor:
+                try:
+                    match = self.tech_log_text.search(
+                        current_tech_anchor, "1.0", stopindex="end", exact=True
+                    )
+                    if match:
+                        # Coloca a mesma linha novamente no topo da janela.
+                        self.tech_log_text.yview(match)
+                        restored = True
+                except Exception:
+                    restored = False
+            if not restored:
+                self.tech_log_text.yview_moveto(current_tech_y)
+
         self.tech_log_text.configure(state="disabled")
 
     def _status_auto_refresh(self):

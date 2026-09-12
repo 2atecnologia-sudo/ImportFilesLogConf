@@ -927,12 +927,7 @@ def _process_file_impl(file_path: str, settings):
         info.coletor_id,
         assinatura_par,
     ):
-        logging.info(
-            f"[SYNC DUPLICADA IGNORADA] "
-            f"Coletor={info.coletor_id} | "
-            f"LOGCONF={os.path.basename(logconf_path)} | "
-            f"CONFPROD={os.path.basename(confprod_path)}"
-        )
+        # Estado inalterado: a varredura periódica não deve gerar log.
         return
 
     logging.info(
@@ -1119,7 +1114,7 @@ def _process_file_impl(file_path: str, settings):
                         f"SQL='{dif.valor_sql}' -> TXT='{dif.valor_txt}'"
                     )
             elif item.situacao == "NOVO":
-                logging.error(
+                logging.info(
                     f"[SIMULACAO][PRODCONF][NOVO] "
                     f"Linha={item.linha} | {item.chave}"
                 )
@@ -1133,7 +1128,6 @@ def _process_file_impl(file_path: str, settings):
         if (
             comp_logconf.novos > 0
             or comp_logconf.erros > 0
-            or comp_prodconf.novos > 0
             or comp_prodconf.erros > 0
         ):
             logging.error(
@@ -1688,11 +1682,18 @@ def main():
         proximo_preflight_externo = (
             time.monotonic() + _EXTERNAL_PREFLIGHT_INTERVAL_SEC
         )
+        proximo_heartbeat_monitor = time.monotonic() + 180
 
         while True:
             time.sleep(1)
 
             agora = time.monotonic()
+
+            if agora >= proximo_heartbeat_monitor:
+                proximo_heartbeat_monitor = agora + 180
+                logging.info(
+                    "[MONITOR DE ARQUIVOS] RODANDO | Varredura concluída"
+                )
 
             if agora >= proxima_verificacao_xml_assumido:
                 proxima_verificacao_xml_assumido = agora + 5
