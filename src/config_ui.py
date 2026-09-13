@@ -200,6 +200,7 @@ class ConfigUI(tk.Tk):
         self._build()
         self._load_to_form()
         self._apply_states()
+        self._apply_stock_setup_lock_state()
         self._select_initial_tab()
         self.after(150, self._apply_license_ui_mode)
 
@@ -543,11 +544,12 @@ class ConfigUI(tk.Tk):
             row=12, column=0, columnspan=3, sticky="w", padx=10, pady=(8, 8)
         )
 
-        ttk.Button(
+        self.btn_external_new = ttk.Button(
             connector_actions,
             text="Nova conexão",
             command=self._new_external_connection,
-        ).pack(side="left")
+        )
+        self.btn_external_new.pack(side="left")
 
         self.btn_external_edit = ttk.Button(
             connector_actions,
@@ -643,11 +645,12 @@ class ConfigUI(tk.Tk):
             justify="left",
         ).pack(side="left", padx=10, pady=9)
 
-        ttk.Button(
+        self.btn_load_example_stock = ttk.Button(
             reset_box,
             text="Carregar Banco de Exemplo",
             command=self._load_example_stock,
-        ).pack(side="right", padx=(6, 10), pady=9)
+        )
+        self.btn_load_example_stock.pack(side="right", padx=(6, 10), pady=9)
 
         ttk.Button(
             reset_box,
@@ -673,17 +676,19 @@ class ConfigUI(tk.Tk):
             width=72,
         ).grid(row=0, column=1, sticky="w", padx=8, pady=8)
 
-        ttk.Button(
+        self.btn_pick_test_stock_file = ttk.Button(
             file_box,
             text="Escolher arquivo...",
             command=self._pick_test_environment_file,
-        ).grid(row=0, column=2, sticky="w", padx=8, pady=8)
+        )
+        self.btn_pick_test_stock_file.grid(row=0, column=2, sticky="w", padx=8, pady=8)
 
-        ttk.Button(
+        self.btn_import_test_stock = ttk.Button(
             file_box,
             text="Importar Estoque",
             command=self._import_test_environment_stock,
-        ).grid(row=0, column=3, sticky="w", padx=8, pady=8)
+        )
+        self.btn_import_test_stock.grid(row=0, column=3, sticky="w", padx=8, pady=8)
 
         self.test_file_status = tk.StringVar(
             value="Nenhum arquivo selecionado."
@@ -1035,6 +1040,15 @@ class ConfigUI(tk.Tk):
         Importa somente após validar 100% do arquivo.
         Nesta etapa grava apenas dbo.ESTOQUE; não cria movimentações.
         """
+        if self._test_stock_setup_locked():
+            messagebox.showwarning(
+                "Importar Estoque",
+                "A carga inicial de estoque não pode ser feita porque já existe leitura em prodConf.\n\n"
+                "Execute Resetar Ambiente para iniciar um novo cenário e carregar o estoque antes da primeira leitura.",
+                parent=self,
+            )
+            return
+
         file_path = self.test_file_var.get().strip()
 
         if not file_path:
@@ -1490,6 +1504,7 @@ class ConfigUI(tk.Tk):
             self.test_file_status.set(
                 "Estoque de teste vazio. Importe um arquivo ou carregue o Banco de Exemplo."
             )
+            self._apply_stock_setup_lock_state()
             self._refresh_test_stock()
             self._refresh_test_moves()
 
@@ -1542,6 +1557,15 @@ class ConfigUI(tk.Tk):
 
     def _load_example_stock(self):
         """Carrega o estoque DEMO salvo em ESTOQUE_BASE_DEMO."""
+        if self._test_stock_setup_locked():
+            messagebox.showwarning(
+                "Banco de Exemplo",
+                "A configuração de estoque não pode ser iniciada porque já existe leitura em prodConf.\n\n"
+                "Execute Resetar Ambiente para iniciar um novo cenário e configurar o estoque antes da primeira leitura.",
+                parent=self,
+            )
+            return
+
         if self._importer_rodando():
             messagebox.showwarning(
                 "Banco de Exemplo",
@@ -5787,6 +5811,10 @@ class ConfigUI(tk.Tk):
                     100,
                     self._refresh_external_connection_status_silent,
                 )
+                self.after(150, self._apply_stock_setup_lock_state)
+
+            if current == str(self.tab_test_environment):
+                self.after(150, self._apply_stock_setup_lock_state)
 
             try:
                 if self.state() != "zoomed":
@@ -6754,11 +6782,96 @@ class ConfigUI(tk.Tk):
         save_cfg(self.cfg)
 
 
+    def _prodconf_has_readings(self):
+        """Retorna True quando já existe ao menos uma leitura gravada em dbo.prodConf."""
+        conn = None
+        try:
+            self.cfg = load_cfg()
+            conn = pyodbc.connect(
+                build_conn_str(self.cfg),
+                timeout=5,
+                autocommit=True,
+            )
+            cur = conn.cursor()
+            cur.execute("SELECT TOP 1 1 FROM dbo.prodConf")
+            return cur.fetchone() is not None
+        except Exception:
+            # Falha de consulta não deve bloquear funcionalidades existentes.
+            return False
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def _test_stock_is_configured(self):
+        """Retorna True quando o estoque de testes já possui carga inicial."""
+        conn = None
+        try:
+            conn = pyodbc.connect(
+                self._build_test_environment_conn_str(),
+                timeout=5,
+                autocommit=True,
+            )
+            cur = conn.cursor()
+            cur.execute("SELECT TOP 1 1 FROM dbo.ESTOQUE")
+            return cur.fetchone() is not None
+        except Exception:
+            return False
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def _external_stock_setup_locked(self):
+        """Bloqueia somente a configuração inicial após a primeira leitura."""
+        has_external = bool(getattr(self, "external_connections", {}))
+        return self._prodconf_has_readings() and not has_external
+
+    def _test_stock_setup_locked(self):
+        """Bloqueia somente a carga inicial de estoque após a primeira leitura."""
+        return self._prodconf_has_readings() and not self._test_stock_is_configured()
+
+    def _apply_stock_setup_lock_state(self):
+        """Atualiza apenas os controles de configuração inicial de estoque."""
+        external_locked = self._external_stock_setup_locked()
+        test_locked = self._test_stock_setup_locked()
+
+        if hasattr(self, "btn_external_new"):
+            self.btn_external_new.configure(state=("disabled" if external_locked else "normal"))
+
+        test_state = "disabled" if test_locked else "normal"
+        for attr in (
+            "btn_load_example_stock",
+            "btn_pick_test_stock_file",
+            "btn_import_test_stock",
+        ):
+            widget = getattr(self, attr, None)
+            if widget is not None:
+                widget.configure(state=test_state)
+
+        if external_locked and hasattr(self, "external_hint_var"):
+            self.external_hint_var.set(
+                "Configuração de estoque indisponível: a conferência já possui leitura. "
+                "Use Resetar Ambiente para iniciar um novo cenário."
+            )
+
     def _selected_external_id(self):
         return getattr(self, "current_external_id", None)
 
 
     def _new_external_connection(self):
+        if self._external_stock_setup_locked():
+            messagebox.showwarning(
+                "Fonte de Dados Externa",
+                "A configuração de estoque não pode ser iniciada porque já existe leitura em prodConf.\n\n"
+                "Execute Resetar Ambiente para iniciar um novo cenário e configurar o estoque antes da primeira leitura.",
+                parent=self,
+            )
+            return
         self._open_external_connection_dialog()
 
 

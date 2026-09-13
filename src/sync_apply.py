@@ -579,6 +579,27 @@ def _gerar_arquivo_individual_se_concluido(conn, settings, num_doc: str):
     return destino
 
 
+def _marcar_estoque_nao_configurado_apos_leitura(cur) -> None:
+    """
+    Após existir leitura válida em PRODCONF, marca os LOGCONF ainda pendentes
+    com StatusLanca=3. Não altera StatusConf nem estados 1/2 já existentes.
+    """
+    cur.execute(
+        """
+        UPDATE dbo.logConf
+           SET StatusLanca = 3,
+               MotivoEstoque = 'Banco de estoque não configurado'
+         WHERE StatusLanca IS NULL
+            OR StatusLanca = 0
+        """
+    )
+
+    logging.info(
+        f"[SYNC][PRIMEIRA LEITURA] "
+        f"StatusLanca=3 aplicado aos LOGCONF pendentes | "
+        f"Registros={cur.rowcount}"
+    )
+
 def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf, coletor_id: str = "") -> ResultadoGravacao:
     conn = get_connection(settings.sql)
     resultado = ResultadoGravacao()
@@ -735,6 +756,12 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf, colet
                 )
 
             resultado.prodconf_atualizados += 1
+
+        # A primeira leitura válida inicia o uso operacional da conferência.
+        # Se nenhum estoque foi configurado, todos os LOGCONF ainda pendentes
+        # passam para StatusLanca=3 no mesmo commit da sincronização.
+        if prodconf_validos:
+            _marcar_estoque_nao_configurado_apos_leitura(cur)
 
         for item in logconf_validos:
             cur.execute(

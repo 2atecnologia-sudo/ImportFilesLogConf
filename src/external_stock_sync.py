@@ -454,20 +454,38 @@ def _update_logconf_status_lanca(
         )
         try:
             cur = conn.cursor()
-            cur.execute(
-                """
-                UPDATE dbo.logConf
-                SET
-                    StatusLanca = ?,
-                    MotivoEstoque = NULLIF(?, '')
-                WHERE CAST(NumNF AS VARCHAR(50)) = ?
-                """,
-                (
-                    str(status_lanca),
-                    str(motivo or "").strip(),
-                    num_doc,
-                ),
-            )
+
+            # StatusLanca=3 representa estoque não configurado.
+            # Nesse caso a condição é global: todas as notas ainda sem resultado
+            # de estoque recebem 3. Estados 1 e 2 permanecem intocados.
+            if str(status_lanca).strip() == "3":
+                cur.execute(
+                    """
+                    UPDATE dbo.logConf
+                    SET
+                        StatusLanca = 3,
+                        MotivoEstoque = NULLIF(?, '')
+                    WHERE StatusLanca IS NULL
+                       OR StatusLanca = 0
+                    """,
+                    (str(motivo or "").strip(),),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE dbo.logConf
+                    SET
+                        StatusLanca = ?,
+                        MotivoEstoque = NULLIF(?, '')
+                    WHERE CAST(NumNF AS VARCHAR(50)) = ?
+                    """,
+                    (
+                        str(status_lanca),
+                        str(motivo or "").strip(),
+                        num_doc,
+                    ),
+                )
+
             conn.commit()
         except Exception:
             try:
