@@ -193,6 +193,143 @@ def safe_move(src: str, dst_dir: str) -> str:
 
 
 
+def _aplicar_status_lanca_primeira_leitura(settings) -> None:
+    """
+    Regra única para Wi-Fi e offline/TXT.
+
+    Quando existir a primeira leitura real em dbo.prodConf e ainda houver
+    LOGCONF com StatusLanca NULL:
+      - verifica se a fonte/banco de estoque está configurada e carregada;
+      - se não estiver configurada/carregada, grava StatusLanca=3 em TODOS
+        os LOGCONF ainda NULL;
+      - se houver estoque carregado, não altera StatusLanca.
+
+    A origem da leitura não importa: Kalipso gravando direto no SQL ou
+    sincronização posterior por LOGCONF/PRODCONF passam pelo mesmo gatilho.
+    """
+    conn = get_connection(settings.sql)
+    try:
+        cur = conn.cursor()
+
+        # Só existe "primeira leitura" quando alguma quantidade efetivamente
+        # lida ficou maior que zero. A simples pré-carga do NFLOG não dispara.
+        cur.execute(
+            """
+            SELECT TOP 1 1
+            FROM dbo.prodConf
+            WHERE ISNULL(QtdeLido, 0) > 0
+            """
+        )
+        if cur.fetchone() is None:
+            return
+
+        # Depois que a regra já foi aplicada não há mais nada a fazer.
+        cur.execute(
+            """
+            SELECT COUNT(*)
+            FROM dbo.logConf
+            WHERE StatusLanca IS NULL
+            """
+        )
+        pendentes = int(cur.fetchone()[0] or 0)
+        if pendentes <= 0:
+            return
+
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    # A verificação do estoque fica fora da conexão local acima para não
+    # manter transação/lock enquanto a fonte externa é consultada.
+    try:
+        from .external_stock_sync import (
+            load_external_data_source,
+            test_external_connection,
+        )
+    except Exception as e:
+        logging.warning(
+            f"[PRIMEIRA LEITURA][ESTOQUE][MODULO INDISPONIVEL] Motivo={e}"
+        )
+        return
+
+    try:
+        source = load_external_data_source()
+
+        estoque_nao_configurado = False
+        motivo = ""
+
+        if not source.configured:
+            estoque_nao_configurado = True
+            motivo = "Fonte de estoque não configurada"
+
+        elif not source.valid:
+            estoque_nao_configurado = True
+            motivo = source.error or "Configuração do estoque incompleta"
+
+        else:
+            teste = test_external_connection()
+
+            if teste.status == "CONNECTION_OK":
+                if int(teste.items or 0) <= 0:
+                    estoque_nao_configurado = True
+                    motivo = "Banco de estoque configurado, porém sem registros carregados"
+                else:
+                    # Estoque configurado e carregado: não altera StatusLanca.
+                    return
+
+            elif teste.status in ("NO_CONFIG", "INVALID_CONFIG", "TABLE_NOT_FOUND"):
+                estoque_nao_configurado = True
+                motivo = teste.message or teste.status
+
+            else:
+                # Falha técnica de conexão não é tratada como "estoque não
+                # configurado"; preserva StatusLanca NULL para nova tentativa.
+                return
+
+        if not estoque_nao_configurado:
+            return
+
+        conn = get_connection(settings.sql)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE dbo.logConf
+                   SET StatusLanca = 3,
+                       MotivoEstoque = 'Banco de estoque não configurado'
+                 WHERE StatusLanca IS NULL
+                """
+            )
+            atualizados = int(cur.rowcount or 0)
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        if atualizados > 0:
+            logging.info(
+                f"[PRIMEIRA LEITURA][ESTOQUE NAO CONFIGURADO] "
+                f"StatusLanca=3 aplicado em todos os LOGCONF com StatusLanca NULL | "
+                f"RegistrosAtualizados={atualizados} | Motivo={motivo}"
+            )
+
+    except Exception as e:
+        logging.exception(
+            f"[PRIMEIRA LEITURA][ESTOQUE][ERRO] "
+            f"Regra não aplicada; StatusLanca preservado | Motivo={e}"
+        )
+
+
 def _listar_documentos_candidatos_externos(settings):
     """
     Retorna documentos cujo estado FINAL no banco local atende ao gatilho:
@@ -1155,6 +1292,10 @@ def _process_file_impl(file_path: str, settings):
             info.coletor_id,
         )
 
+        # Mesma regra usada pelo Wi-Fi: a primeira leitura real decide
+        # o StatusLanca sem depender da origem dos dados.
+        _aplicar_status_lanca_primeira_leitura(settings)
+
         logging.info(
             f"[SYNC GRAVACAO OK] "
             f"Coletor={info.coletor_id} | "
@@ -1720,8 +1861,12 @@ def main():
                     agora + _EXTERNAL_PREFLIGHT_INTERVAL_SEC
                 )
                 try:
+                    settings_atualizados = load_settings()
+                    _aplicar_status_lanca_primeira_leitura(
+                        settings_atualizados
+                    )
                     _executar_varredura_preflight_externo(
-                        load_settings()
+                        settings_atualizados
                     )
                 except Exception as e:
                     logging.exception(

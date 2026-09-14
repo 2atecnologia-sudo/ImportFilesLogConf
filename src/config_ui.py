@@ -720,11 +720,12 @@ class ConfigUI(tk.Tk):
         ).grid(row=0, column=0, columnspan=4, sticky="w", padx=8, pady=(8, 4))
 
         self.test_xml_status = tk.StringVar(value="Nenhum XML importado nesta sessão.")
-        ttk.Button(
+        self.btn_import_nfe_xml_entries = ttk.Button(
             xml_entry_box,
             text="Importar 1 ou vários XMLs...",
             command=self._import_nfe_xml_entries,
-        ).grid(row=1, column=0, sticky="w", padx=8, pady=8)
+        )
+        self.btn_import_nfe_xml_entries.grid(row=1, column=0, sticky="w", padx=8, pady=8)
 
         ttk.Label(
             xml_entry_box,
@@ -760,17 +761,19 @@ class ConfigUI(tk.Tk):
             state="readonly",
         ).grid(row=0, column=1, sticky="w", padx=8, pady=8)
 
-        ttk.Button(
+        self.btn_pick_nfe_watch_folder = ttk.Button(
             watch_box,
             text="Escolher pasta...",
             command=self._pick_nfe_watch_folder,
-        ).grid(row=0, column=2, sticky="w", padx=8, pady=8)
+        )
+        self.btn_pick_nfe_watch_folder.grid(row=0, column=2, sticky="w", padx=8, pady=8)
 
-        ttk.Button(
+        self.btn_process_nfe_watch_now = ttk.Button(
             watch_box,
             text="Processar agora",
             command=self._process_nfe_watch_folder_now,
-        ).grid(row=0, column=3, sticky="w", padx=8, pady=8)
+        )
+        self.btn_process_nfe_watch_now.grid(row=0, column=3, sticky="w", padx=8, pady=8)
 
         self.btn_nfe_watch_start = ttk.Button(
             watch_box,
@@ -809,17 +812,19 @@ class ConfigUI(tk.Tk):
         stock_manual_actions = ttk.Frame(tab_stock)
         stock_manual_actions.pack(fill="x", padx=6, pady=(6, 0))
 
-        ttk.Button(
+        self.btn_edit_test_stock_balance = ttk.Button(
             stock_manual_actions,
             text="Editar Saldo Manualmente...",
             command=self._edit_test_stock_balance,
-        ).pack(side="left")
+        )
+        self.btn_edit_test_stock_balance.pack(side="left")
 
-        ttk.Button(
+        self.btn_edit_test_stock_location = ttk.Button(
             stock_manual_actions,
             text="Editar Local...",
             command=self._edit_test_stock_location,
-        ).pack(side="left", padx=(8, 0))
+        )
+        self.btn_edit_test_stock_location.pack(side="left", padx=(8, 0))
 
         self._build_readonly_grid(
             tab_stock, "test_stock_tree", "test_stock_status",
@@ -6848,6 +6853,12 @@ class ConfigUI(tk.Tk):
             "btn_load_example_stock",
             "btn_pick_test_stock_file",
             "btn_import_test_stock",
+            "btn_import_nfe_xml_entries",
+            "btn_pick_nfe_watch_folder",
+            "btn_process_nfe_watch_now",
+            "btn_nfe_watch_start",
+            "btn_edit_test_stock_balance",
+            "btn_edit_test_stock_location",
         ):
             widget = getattr(self, attr, None)
             if widget is not None:
