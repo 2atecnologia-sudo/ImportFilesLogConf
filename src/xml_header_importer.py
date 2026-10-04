@@ -25,7 +25,13 @@ def _assinatura_xml(path: str):
 
 
 def _tipo_operacao_log(tipo_operacao: str) -> str:
-    return "RECEBIMENTO" if tipo_operacao == "REC" else "EXPEDIÇÃO"
+    if tipo_operacao == "REC":
+        return "RECEBIMENTO"
+    if tipo_operacao == "EXP":
+        return "EXPEDIÇÃO"
+    if tipo_operacao == "SEP":
+        return "SEPARAÇÃO"
+    raise ValueError(f"Tipo de operação XML inválido: {tipo_operacao}")
 
 
 
@@ -37,6 +43,11 @@ def entrada_xml_rec_dir(settings) -> str:
 def entrada_xml_exp_dir(settings) -> str:
     """Pasta de XMLs de expedição; cabeçalho usa o destinatário."""
     return os.path.join(os.path.dirname(os.path.normpath(settings.watch.input_dir)), "entrada_xmlExp")
+
+
+def entrada_xml_sep_dir(settings) -> str:
+    """Pasta de XMLs de separação; cabeçalho usa o destinatário."""
+    return os.path.join(os.path.dirname(os.path.normpath(settings.watch.input_dir)), "entrada_xmlSep")
 
 
 def _wait_file_stable(path: str, checks: int = 3, interval_sec: float = 1.0) -> bool:
@@ -91,13 +102,13 @@ def _filho_por_nome(parent, nome: str):
 
 
 def _nome_cabecalho_xml(file_path: str, tipo_operacao: str) -> str:
-    """REC usa emit/xNome; EXP usa dest/xNome."""
+    """REC usa emit/xNome; EXP/SEP usam dest/xNome."""
     root = ET.parse(file_path).getroot()
     inf_nfe = next((e for e in root.iter() if _local_name(e.tag) == "infNFe"), None)
     if inf_nfe is None:
         raise ValueError("XML sem elemento infNFe.")
 
-    grupo = "emit" if tipo_operacao == "REC" else "dest" if tipo_operacao == "EXP" else None
+    grupo = "emit" if tipo_operacao == "REC" else "dest" if tipo_operacao in {"EXP", "SEP"} else None
     if grupo is None:
         raise ValueError(f"Tipo de operação XML inválido: {tipo_operacao}")
 
@@ -286,6 +297,7 @@ def processar_xml_entrada(file_path: str, settings, tipo_operacao: str) -> None:
                 settings.app.status_inicial,
                 coletor_id=None,
                 commit=False,
+                processo=processo_log,
             )
         else:
             # Expedição permanece, por enquanto, somente com o cabeçalho.
@@ -295,6 +307,7 @@ def processar_xml_entrada(file_path: str, settings, tipo_operacao: str) -> None:
                 nomecli,
                 status_conf="AGUARDANDO",
                 coletor_id=None,
+                processo=processo_log,
             )
 
         # Primeiro confirma o SQL. Somente depois o XML consolidado é publicado
@@ -354,6 +367,10 @@ def processados_xml_exp_dir(settings) -> str:
     return os.path.join(settings.watch.processed_dir, "xmlExp")
 
 
+def processados_xml_sep_dir(settings) -> str:
+    return os.path.join(settings.watch.processed_dir, "xmlSep")
+
+
 def _arquivar_xmls_da_pasta(settings, pasta_entrada: str, pasta_processados: str, tipo_operacao: str) -> None:
     if not os.path.isdir(pasta_entrada):
         return
@@ -408,12 +425,15 @@ def _arquivar_xmls_da_pasta(settings, pasta_entrada: str, pasta_processados: str
 
 
 def arquivar_xmls_em_andamento(settings) -> None:
-    """Arquiva REC/EXP somente após a NF ser assumida no logConf."""
+    """Arquiva REC/EXP/SEP somente após a NF ser assumida no logConf."""
     _arquivar_xmls_da_pasta(
         settings, entrada_xml_rec_dir(settings), processados_xml_rec_dir(settings), "REC"
     )
     _arquivar_xmls_da_pasta(
         settings, entrada_xml_exp_dir(settings), processados_xml_exp_dir(settings), "EXP"
+    )
+    _arquivar_xmls_da_pasta(
+        settings, entrada_xml_sep_dir(settings), processados_xml_sep_dir(settings), "SEP"
     )
 
 
@@ -430,7 +450,8 @@ def _processar_pasta_xml_tipo(settings, pasta: str, tipo_operacao: str) -> None:
 
 
 def processar_pasta_xml(settings) -> None:
-    """Varre somente XML REC/EXP; não altera o processamento TXT."""
+    """Varre somente XML REC/EXP/SEP; não altera o processamento TXT."""
     _processar_pasta_xml_tipo(settings, entrada_xml_rec_dir(settings), "REC")
     _processar_pasta_xml_tipo(settings, entrada_xml_exp_dir(settings), "EXP")
+    _processar_pasta_xml_tipo(settings, entrada_xml_sep_dir(settings), "SEP")
 

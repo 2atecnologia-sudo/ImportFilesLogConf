@@ -76,6 +76,9 @@ def bool_to_ini(b: bool) -> str:
 def build_conn_str(cfg: configparser.ConfigParser) -> str:
     driver = cfg.get("sql", "driver", fallback="ODBC Driver 18 for SQL Server").strip()
     server = cfg.get("sql", "server", fallback="127.0.0.1").strip()
+    port = cfg.get("sql", "port", fallback="").strip()
+    if port and "," not in server:
+        server = f"{server},{port}"
     database = cfg.get("sql", "database", fallback="").strip()
     trusted = as_bool(cfg.get("sql", "trusted_connection", fallback="no"))
 
@@ -258,7 +261,8 @@ class ConfigUI(tk.Tk):
 
         self._entry(fs, "Driver ODBC", "sql.driver", 0)
         self._entry(fs, "Servidor (IP ou HOST\\INSTÂNCIA)", "sql.server", 1)
-        self._entry(fs, "Banco", "sql.database", 2)
+        self._entry(fs, "Porta", "sql.port", 2)
+        self._entry(fs, "Banco", "sql.database", 3)
 
         self.vars["sql.trusted_connection"] = tk.BooleanVar()
         ttk.Checkbutton(
@@ -266,10 +270,10 @@ class ConfigUI(tk.Tk):
             text="Usar autenticação do Windows (Trusted Connection)",
             variable=self.vars["sql.trusted_connection"],
             command=self._apply_states
-        ).grid(row=3, column=0, columnspan=3, sticky="w", padx=8, pady=8)
+        ).grid(row=4, column=0, columnspan=3, sticky="w", padx=8, pady=8)
 
-        self._entry(fs, "Usuário", "sql.user", 4)
-        self._entry(fs, "Senha", "sql.password", 5, show="*")
+        self._entry(fs, "Usuário", "sql.user", 5)
+        self._entry(fs, "Senha", "sql.password", 6, show="*")
 
         ttk.Button(tab_sql, text="Testar conexão", command=self._test_connection).pack(
             anchor="w", padx=20, pady=(0, 10)
@@ -859,10 +863,9 @@ class ConfigUI(tk.Tk):
             self._refresh_test_moves,
         )
 
-        # Carrega automaticamente as grades ao abrir Ambiente de Testes.
-        # O after() deixa a janela terminar de ser montada antes das consultas SQL.
-        self.after(150, self._refresh_test_stock)
-        self.after(250, self._refresh_test_moves)
+        # As grades do Ambiente de Testes são carregadas somente quando
+        # o usuário entrar nessa aba. Isso evita consultas SQL de teste
+        # durante a abertura normal do aplicativo.
 
     def _pick_test_environment_file(self):
         """Seleciona o TXT/CSV de carga. Nesta etapa, apenas guarda o caminho."""
@@ -3119,6 +3122,9 @@ class ConfigUI(tk.Tk):
         cfg = load_cfg()
         driver = cfg.get("sql", "driver", fallback="ODBC Driver 18 for SQL Server").strip()
         server = cfg.get("sql", "server", fallback="127.0.0.1").strip()
+        port = cfg.get("sql", "port", fallback="").strip()
+        if port and "," not in server:
+            server = f"{server},{port}"
         trusted = as_bool(cfg.get("sql", "trusted_connection", fallback="no"))
 
         parts = [
@@ -5820,6 +5826,8 @@ class ConfigUI(tk.Tk):
 
             if current == str(self.tab_test_environment):
                 self.after(150, self._apply_stock_setup_lock_state)
+                self.after(200, self._refresh_test_stock)
+                self.after(250, self._refresh_test_moves)
 
             try:
                 if self.state() != "zoomed":
@@ -6375,6 +6383,7 @@ class ConfigUI(tk.Tk):
         # SQL
         self.vars["sql.driver"].set(g("sql", "driver", "ODBC Driver 18 for SQL Server"))
         self.vars["sql.server"].set(g("sql", "server", "127.0.0.1"))
+        self.vars["sql.port"].set(g("sql", "port", ""))
         self.vars["sql.database"].set(g("sql", "database", "SEU_BANCO_AQUI"))
         self.vars["sql.user"].set(g("sql", "user", "sa"))
         self.vars["sql.password"].set(g("sql", "password", ""))
@@ -6470,6 +6479,7 @@ class ConfigUI(tk.Tk):
         # SQL
         setv("sql", "driver", self.vars["sql.driver"].get().strip())
         setv("sql", "server", self.vars["sql.server"].get().strip())
+        setv("sql", "port", self.vars["sql.port"].get().strip())
         setv("sql", "database", self.vars["sql.database"].get().strip())
         setv("sql", "trusted_connection", bool_to_ini(self.vars["sql.trusted_connection"].get()))
         setv("sql", "user", self.vars["sql.user"].get().strip())

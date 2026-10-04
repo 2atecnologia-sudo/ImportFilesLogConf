@@ -31,6 +31,7 @@ def as_bool(v: str) -> bool:
 class SqlSettings:
     driver: str
     server: str
+    port: str
     database: str
     trusted_connection: bool
     user: str
@@ -100,6 +101,7 @@ def load_settings() -> Settings:
     sql = SqlSettings(
         driver=cfg.get("sql", "driver", fallback="ODBC Driver 18 for SQL Server").strip(),
         server=cfg.get("sql", "server", fallback="127.0.0.1").strip(),
+        port=cfg.get("sql", "port", fallback="").strip(),
         database=cfg.get("sql", "database", fallback="").strip(),
         trusted_connection=as_bool(cfg.get("sql", "trusted_connection", fallback="no")),
         user=cfg.get("sql", "user", fallback="").strip(),

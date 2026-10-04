@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
@@ -210,29 +210,38 @@ def _valor_hora_para_sql(hora: str, tipo_sql: str):
 def _buscar_prodconf(cur, reg, lock: bool = False):
     ean = _texto(reg.ean)
     cod = _texto(reg.cod_prod)
+    processo = _texto(reg.processo)
     hint = " WITH (UPDLOCK, HOLDLOCK)" if lock else ""
 
     if ean and cod:
         sql = f"""
-            SELECT NumDoc, CodProd, GTIN, QtdeLido, Saldo, Localizacao, Status
+            SELECT NumDoc, CodProd, GTIN, QtdeLido, Saldo, Localizacao, Status, Processo
             FROM dbo.prodConf{hint}
             WHERE CAST(NumDoc AS VARCHAR(50)) = ?
+              AND (
+                    LTRIM(RTRIM(ISNULL(CAST(Processo AS VARCHAR(50)), ''))) = ?
+                    OR LTRIM(RTRIM(ISNULL(CAST(Processo AS VARCHAR(50)), ''))) = ''
+                  )
               AND (
                     LTRIM(RTRIM(ISNULL(CAST(CodProd AS VARCHAR(100)), ''))) = ?
                     OR
                     LTRIM(RTRIM(ISNULL(CAST(GTIN AS VARCHAR(100)), ''))) = ?
                   )
         """
-        params = (str(reg.num_doc), cod, ean)
+        params = (str(reg.num_doc), processo, cod, ean)
 
     elif cod:
         sql = f"""
-            SELECT NumDoc, CodProd, GTIN, QtdeLido, Saldo, Localizacao, Status
+            SELECT NumDoc, CodProd, GTIN, QtdeLido, Saldo, Localizacao, Status, Processo
             FROM dbo.prodConf{hint}
             WHERE CAST(NumDoc AS VARCHAR(50)) = ?
+              AND (
+                    LTRIM(RTRIM(ISNULL(CAST(Processo AS VARCHAR(50)), ''))) = ?
+                    OR LTRIM(RTRIM(ISNULL(CAST(Processo AS VARCHAR(50)), ''))) = ''
+                  )
               AND LTRIM(RTRIM(ISNULL(CAST(CodProd AS VARCHAR(100)), ''))) = ?
         """
-        params = (str(reg.num_doc), cod)
+        params = (str(reg.num_doc), processo, cod)
 
     else:
         if not ean:
@@ -241,12 +250,16 @@ def _buscar_prodconf(cur, reg, lock: bool = False):
             )
 
         sql = f"""
-            SELECT NumDoc, CodProd, GTIN, QtdeLido, Saldo, Localizacao, Status
+            SELECT NumDoc, CodProd, GTIN, QtdeLido, Saldo, Localizacao, Status, Processo
             FROM dbo.prodConf{hint}
             WHERE CAST(NumDoc AS VARCHAR(50)) = ?
+              AND (
+                    LTRIM(RTRIM(ISNULL(CAST(Processo AS VARCHAR(50)), ''))) = ?
+                    OR LTRIM(RTRIM(ISNULL(CAST(Processo AS VARCHAR(50)), ''))) = ''
+                  )
               AND LTRIM(RTRIM(ISNULL(CAST(GTIN AS VARCHAR(100)), ''))) = ?
         """
-        params = (str(reg.num_doc), ean)
+        params = (str(reg.num_doc), processo, ean)
 
     cur.execute(sql, params)
     return cur.fetchall()
@@ -262,38 +275,51 @@ def _update_prodconf(cur, reg, coletor_id: str = ""):
         _texto(reg.localizacao) or None,
         _texto(reg.status).upper(),
         _texto(coletor_id) or None,
+        _texto(reg.processo) or None,
     )
 
     if ean and cod:
         sql = """
             UPDATE dbo.prodConf
-               SET QtdeLido = ?, Saldo = ?, Localizacao = ?, Status = ?, ColetorID = ?
+               SET QtdeLido = ?, Saldo = ?, Localizacao = ?, Status = ?, ColetorID = ?, Processo = ?
              WHERE CAST(NumDoc AS VARCHAR(50)) = ?
+               AND (
+                    LTRIM(RTRIM(ISNULL(CAST(Processo AS VARCHAR(50)), ''))) = ?
+                    OR LTRIM(RTRIM(ISNULL(CAST(Processo AS VARCHAR(50)), ''))) = ''
+                  )
                AND (
                     LTRIM(RTRIM(ISNULL(CAST(CodProd AS VARCHAR(100)), ''))) = ?
                     OR
                     LTRIM(RTRIM(ISNULL(CAST(GTIN AS VARCHAR(100)), ''))) = ?
                    )
         """
-        params = valores + (str(reg.num_doc), cod, ean)
+        params = valores + (str(reg.num_doc), _texto(reg.processo), cod, ean)
 
     elif cod:
         sql = """
             UPDATE dbo.prodConf
-               SET QtdeLido = ?, Saldo = ?, Localizacao = ?, Status = ?, ColetorID = ?
+               SET QtdeLido = ?, Saldo = ?, Localizacao = ?, Status = ?, ColetorID = ?, Processo = ?
              WHERE CAST(NumDoc AS VARCHAR(50)) = ?
+               AND (
+                    LTRIM(RTRIM(ISNULL(CAST(Processo AS VARCHAR(50)), ''))) = ?
+                    OR LTRIM(RTRIM(ISNULL(CAST(Processo AS VARCHAR(50)), ''))) = ''
+                  )
                AND LTRIM(RTRIM(ISNULL(CAST(CodProd AS VARCHAR(100)), ''))) = ?
         """
-        params = valores + (str(reg.num_doc), cod)
+        params = valores + (str(reg.num_doc), _texto(reg.processo), cod)
 
     else:
         sql = """
             UPDATE dbo.prodConf
-               SET QtdeLido = ?, Saldo = ?, Localizacao = ?, Status = ?, ColetorID = ?
+               SET QtdeLido = ?, Saldo = ?, Localizacao = ?, Status = ?, ColetorID = ?, Processo = ?
              WHERE CAST(NumDoc AS VARCHAR(50)) = ?
+               AND (
+                    LTRIM(RTRIM(ISNULL(CAST(Processo AS VARCHAR(50)), ''))) = ?
+                    OR LTRIM(RTRIM(ISNULL(CAST(Processo AS VARCHAR(50)), ''))) = ''
+                  )
                AND LTRIM(RTRIM(ISNULL(CAST(GTIN AS VARCHAR(100)), ''))) = ?
         """
-        params = valores + (str(reg.num_doc), ean)
+        params = valores + (str(reg.num_doc), _texto(reg.processo), ean)
 
     cur.execute(sql, params)
 
@@ -310,7 +336,7 @@ def _insert_prodconf(cur, reg, coletor_id: str = ""):
     Insere um item novo de PRODCONF espelhando o retorno do coletor.
 
     O layout recebido possui:
-      NumDoc, QtdeLido, Saldo, EAN, CodProd, Localizacao, Status.
+      NumDoc, QtdeLido, Saldo, EAN, CodProd, Localizacao, Status, Processo.
 
     Para um registro novo, QtdeDoc é reconstruída como:
       QtdeDoc = QtdeLido + Saldo
@@ -382,9 +408,10 @@ def _insert_prodconf(cur, reg, coletor_id: str = ""):
                 Localizacao,
                 Status,
                 DataeHora,
-                ColetorID
+                ColetorID,
+                Processo
             )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             str(reg.num_doc),
@@ -400,6 +427,7 @@ def _insert_prodconf(cur, reg, coletor_id: str = ""):
             _texto(reg.status).upper(),
             agora.strftime("%Y-%m-%d %H:%M:%S"),
             _texto(coletor_id) or None,
+            _texto(reg.processo) or None,
         ),
     )
 
@@ -784,12 +812,14 @@ def aplicar_sincronizacao(settings, registros_logconf, registros_prodconf, colet
                 _numero_normalizado(reg.saldo),
                 _texto(reg.localizacao),
                 _texto(reg.status).upper(),
+                _texto(reg.processo),
             )
             obtido = (
                 _numero_normalizado(row.QtdeLido),
                 _numero_normalizado(row.Saldo),
                 _texto(row.Localizacao),
                 _texto(row.Status).upper(),
+                _texto(row.Processo),
             )
 
             if obtido != esperado:

@@ -41,6 +41,7 @@ class ProdConfRegistro:
     cod_prod: str
     localizacao: str
     status: str
+    processo: str
 
 
 @dataclass
@@ -434,14 +435,14 @@ def parse_prodconf(path: str) -> ResultadoArquivo:
 
     separador = _detectar_separador(
         linhas_com_conteudo,
-        campos_esperados=7
+        campos_esperados=8
     )
 
     if separador is None:
 
         resultado.erro_estrutural = (
             "Não foi possível identificar o separador "
-            "ou o arquivo não possui o layout de 7 campos."
+            "ou o arquivo não possui o layout de 8 campos."
         )
 
         return resultado
@@ -470,7 +471,7 @@ def parse_prodconf(path: str) -> ResultadoArquivo:
             for p in linha.split(separador)
         ]
 
-        if len(partes) != 7:
+        if len(partes) != 8:
 
             resultado.erros.append(
                 ErroRegistro(
@@ -479,7 +480,7 @@ def parse_prodconf(path: str) -> ResultadoArquivo:
                     conteudo=linha_original,
                     motivo=(
                         f"Quantidade de campos inválida. "
-                        f"Esperado=7, recebido={len(partes)}."
+                        f"Esperado=8, recebido={len(partes)}."
                     )
                 )
             )
@@ -495,6 +496,7 @@ def parse_prodconf(path: str) -> ResultadoArquivo:
             cod_prod,
             localizacao,
             status,
+            processo,
         ) = partes
 
         if not _validar_numero_inteiro(num_doc):
@@ -569,6 +571,7 @@ def parse_prodconf(path: str) -> ResultadoArquivo:
             cod_prod=cod_prod,
             localizacao=localizacao,
             status=status,
+            processo=processo,
         )
 
         resultado.registros.append(registro)

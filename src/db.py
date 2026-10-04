@@ -10,6 +10,9 @@ from .settings import SqlSettings
 def build_conn_str(sql_cfg: SqlSettings) -> str:
     driver = sql_cfg.driver
     server = sql_cfg.server
+    port = sql_cfg.port
+    if port and "," not in server:
+        server = f"{server},{port}"
     database = sql_cfg.database
 
     if sql_cfg.trusted_connection:
@@ -77,7 +80,7 @@ def prodconf_has_column(conn, column_name: str) -> bool:
     return cur.fetchone() is not None
 
 
-def insert_logconf_header(conn, num_nf: str, nome_cli: str, status_conf: str = "AGUARDANDO", coletor_id: str | None = None):
+def insert_logconf_header(conn, num_nf: str, nome_cli: str, status_conf: str = "AGUARDANDO", coletor_id: str | None = None, processo: str | None = None):
     """
     Insere 1 linha em dbo.logConf com (NumNF, NomeCli, StatusConf).
     Se já existir, não faz nada.
@@ -93,13 +96,32 @@ def insert_logconf_header(conn, num_nf: str, nome_cli: str, status_conf: str = "
         return
 
     sql = """
-    INSERT INTO dbo.logConf (NumNF, NomeCli, StatusConf, ColetorID)
-    VALUES (?, ?, ?, ?)
+    INSERT INTO dbo.logConf (NumNF, NomeCli, StatusConf, ColetorID, Processo)
+    VALUES (?, ?, ?, ?, ?)
     """
-    cur.execute(sql, (num_nf_db, str(nome_cli)[:80], status_conf, str(coletor_id or "")[:100]))
+    cur.execute(sql, (num_nf_db, str(nome_cli)[:80], status_conf, str(coletor_id or "")[:100], str(processo or "")))
 
 
-def insert_prodconf_items(conn, num_doc: str, nome_cli: str, itens: list[dict], status_inicial: str, coletor_id: str | None = None, commit: bool = True):
+def update_logconf_processo_if_empty(conn, num_nf: str, processo: str | None) -> None:
+    """Preenche Processo somente quando foi informado e o campo atual está vazio."""
+    processo_txt = str(processo or "").strip()
+    if not processo_txt:
+        return
+
+    num_nf_db = _to_int_or_raise(num_nf)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE dbo.logConf
+           SET Processo = ?
+         WHERE NumNF = ?
+           AND (Processo IS NULL OR LTRIM(RTRIM(Processo)) = '')
+        """,
+        (processo_txt, num_nf_db),
+    )
+
+
+def insert_prodconf_items(conn, num_doc: str, nome_cli: str, itens: list[dict], status_inicial: str, coletor_id: str | None = None, commit: bool = True, processo: str | None = None):
     """
     Insere cabeçalho em dbo.logConf (NumNF, NomeCli, StatusConf="AGUARDANDO")
     e itens em dbo.prodConf.
@@ -124,7 +146,7 @@ def insert_prodconf_items(conn, num_doc: str, nome_cli: str, itens: list[dict], 
     data_hora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # >>> Cabeçalho (logConf)
-    insert_logconf_header(conn, num_doc, nome_cli, status_conf="AGUARDANDO", coletor_id=coletor_id)
+    insert_logconf_header(conn, num_doc, nome_cli, status_conf="AGUARDANDO", coletor_id=coletor_id, processo=processo)
 
     # >>> Detalhe (prodConf)
     colunas = ["NumDoc", "NomeCli", "DataImp"]

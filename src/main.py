@@ -13,7 +13,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 from .settings import load_settings
-from .db import get_connection, numdoc_exists, insert_prodconf_items, normalize_empty_conference_tables
+from .db import get_connection, numdoc_exists, insert_prodconf_items, normalize_empty_conference_tables, update_logconf_processo_if_empty
 from .parser_xml import parse_nfe_xml
 from .parser_txt import parse_txt_documents
 from .file_router import identificar_arquivo, localizar_par_sync
@@ -549,7 +549,7 @@ def process_xml(file_path: str, settings):
         raise
 
 
-def process_txt(file_path: str, settings, coletor_id: str | None = None):
+def process_txt(file_path: str, settings, coletor_id: str | None = None, processo: str | None = None):
     docs = parse_txt_documents(
         file_path,
         delimiter=settings.txt.delimiter,
@@ -575,6 +575,11 @@ def process_txt(file_path: str, settings, coletor_id: str | None = None):
                 continue
 
             if numdoc_exists(conn, numdoc):
+                # Se o documento já existir e esta entrada informar o processo,
+                # completa somente o campo Processo quando ele ainda estiver vazio.
+                # Não altera nenhum outro dado já importado/validado.
+                update_logconf_processo_if_empty(conn, numdoc, processo)
+                conn.commit()
                 skipped_dup += 1
                 logging.warning(
                     f"[TXT] NumDoc {numdoc} já existe. Pulando."
@@ -588,7 +593,13 @@ def process_txt(file_path: str, settings, coletor_id: str | None = None):
                 itens,
                 settings.app.status_inicial,
                 coletor_id=coletor_id,
+                processo=processo,
             )
+
+            # Garantia localizada para NFLOGs das pastas por processo:
+            # somente preenche Processo caso tenha permanecido vazio.
+            update_logconf_processo_if_empty(conn, numdoc, processo)
+            conn.commit()
 
             imported += 1
 
@@ -633,6 +644,27 @@ def _entrada_txt(settings) -> str:
     return os.path.join(
         os.path.dirname(os.path.normpath(settings.watch.input_dir)),
         "entrada_txt",
+    )
+
+
+def _entrada_txt_rec(settings) -> str:
+    return os.path.join(
+        os.path.dirname(os.path.normpath(settings.watch.input_dir)),
+        "entrada_txtRec",
+    )
+
+
+def _entrada_txt_exp(settings) -> str:
+    return os.path.join(
+        os.path.dirname(os.path.normpath(settings.watch.input_dir)),
+        "entrada_txtExp",
+    )
+
+
+def _entrada_txt_sep(settings) -> str:
+    return os.path.join(
+        os.path.dirname(os.path.normpath(settings.watch.input_dir)),
+        "entrada_txtSep",
     )
 
 
@@ -692,7 +724,7 @@ def _arquivar_nflog_erp_duplicado(file_path: str, settings, info):
     )
 
 
-def _processar_nflog_erp(file_path: str, settings):
+def _processar_nflog_erp(file_path: str, settings, processo: str | None = None):
     with _nflog_erp_lock:
         if not os.path.isfile(file_path):
             return
@@ -719,7 +751,7 @@ def _processar_nflog_erp(file_path: str, settings):
                     "nova carga diferente aguardará sem tocar no SQL."
                 )
 
-            process_txt(file_path, settings, coletor_id=info.coletor_id)
+            process_txt(file_path, settings, coletor_id=info.coletor_id, processo=processo)
 
             shutil.move(file_path, destino)
             logging.info(
@@ -733,12 +765,19 @@ def _processar_nflog_erp(file_path: str, settings):
 
 
 def _processar_entrada_txt(settings):
-    entrada_txt = _entrada_txt(settings)
-    ensure_dirs(entrada_txt)
-    for nome in sorted(os.listdir(entrada_txt)):
-        caminho = os.path.join(entrada_txt, nome)
-        if os.path.isfile(caminho):
-            _processar_nflog_erp(caminho, settings)
+    pastas = (
+        (_entrada_txt(settings), None),
+        (_entrada_txt_rec(settings), "RECEBIMENTO"),
+        (_entrada_txt_exp(settings), "EXPEDIÇÃO"),
+        (_entrada_txt_sep(settings), "SEPARAÇÃO"),
+    )
+
+    for entrada_txt, processo in pastas:
+        ensure_dirs(entrada_txt)
+        for nome in sorted(os.listdir(entrada_txt)):
+            caminho = os.path.join(entrada_txt, nome)
+            if os.path.isfile(caminho):
+                _processar_nflog_erp(caminho, settings, processo=processo)
 
 
 def _process_file_impl(file_path: str, settings):
@@ -1409,6 +1448,15 @@ def process_file(file_path: str, settings):
     if pasta_arquivo == os.path.normcase(os.path.abspath(_entrada_txt(settings))):
         return _processar_nflog_erp(file_path, settings)
 
+    if pasta_arquivo == os.path.normcase(os.path.abspath(_entrada_txt_rec(settings))):
+        return _processar_nflog_erp(file_path, settings, processo="RECEBIMENTO")
+
+    if pasta_arquivo == os.path.normcase(os.path.abspath(_entrada_txt_exp(settings))):
+        return _processar_nflog_erp(file_path, settings, processo="EXPEDIÇÃO")
+
+    if pasta_arquivo == os.path.normcase(os.path.abspath(_entrada_txt_sep(settings))):
+        return _processar_nflog_erp(file_path, settings, processo="SEPARAÇÃO")
+
     ext = os.path.splitext(file_path)[1].lower()
     info = identificar_arquivo(file_path)
 
@@ -1777,12 +1825,18 @@ def main():
     )
 
     entrada_txt = _entrada_txt(settings)
+    entrada_txt_rec = _entrada_txt_rec(settings)
+    entrada_txt_exp = _entrada_txt_exp(settings)
+    entrada_txt_sep = _entrada_txt_sep(settings)
     entrada_xml_rec = entrada_xml_rec_dir(settings)
     entrada_xml_exp = entrada_xml_exp_dir(settings)
 
     ensure_dirs(
         settings.watch.input_dir,
         entrada_txt,
+        entrada_txt_rec,
+        entrada_txt_exp,
+        entrada_txt_sep,
         entrada_xml_rec,
         entrada_xml_exp,
         settings.watch.processed_dir,
@@ -1812,6 +1866,9 @@ def main():
         recursive=False,
     )
     observer.schedule(handler, entrada_txt, recursive=False)
+    observer.schedule(handler, entrada_txt_rec, recursive=False)
+    observer.schedule(handler, entrada_txt_exp, recursive=False)
+    observer.schedule(handler, entrada_txt_sep, recursive=False)
     observer.schedule(handler, entrada_xml_rec, recursive=False)
     observer.schedule(handler, entrada_xml_exp, recursive=False)
 
