@@ -1,0 +1,7 @@
+Correção localizada do Tray: reconhece o Importer da mesma instalação iniciado externamente, inclusive pela Retaguarda.
+Preserva os estados verde, vermelho para erro SQL e cinza quando parado.
+Evita iniciar cópia duplicada e permite Parar/Reiniciar o processo detectado.
+Substitua src/tray.py em C:\Projetos2\ImportFilesLogConf e gere novamente o Tray.
+Feche o Tray antigo antes de abrir o novo EXE.
+Com a Retaguarda aberta, ela reinicia automaticamente o Importer após uma parada.
+Sintaxe e detecção de processos testadas com simulação, sem execução real no Windows.

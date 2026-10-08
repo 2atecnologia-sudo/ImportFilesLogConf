@@ -1,0 +1,15 @@
+﻿.venv/
+venv/
+build/
+dist/
+__pycache__/
+*.pyc
+*.log
+*.tmp
+.vscode/
+.idea/
+config.ini
+licenc.ini
+usuarios.json
+
+*.zip

@@ -1,0 +1,120 @@
+Retaguarda de Conferência 2A - 1.0.31
+
+Feche a retaguarda. Extraia substituindo os fontes em:
+C:\Projetos2\RetaguardaConferencia
+Gere novamente:
+powershell -ExecutionPolicy Bypass -File .\gerar_build.ps1
+Abra dist\RetaguardaConferencia\RetaguardaConferencia.exe.
+
+A retaguarda localiza automaticamente o importador em execução e lê sua
+configuração SQL e licença. Não há ativação ou administração de licença aqui.
+Configurações apenas exibe os dados compartilhados, sem redigitar senha.
+Para mudar SQL ou ativar/renovar licença, use o importador.
+Se houver várias instalações, abra apenas o importador que deseja acompanhar.
+Caso não encontre a instalação, a retaguarda informa o problema e bloqueia
+as atualizações. Não é necessário selecionar arquivo ou pasta.
+
+O monitor lê logConf, prodConf e scanocorconf a cada 30 segundos.
+Sem licença válida, a consulta de conferências não é executada.
+A verificação usa código de suporte do mesmo PC e formato .lic do importador.
+Não altera a configuração, a licença ou os dados do importador.
+Itens legados sem processo: vínculo pelo número de NF; evite o mesmo número
+em processos diferentes enquanto houver itens sem Processo.
+Ocorrências: vínculo por NF/coletor, pois não há Processo no esquema fornecido.
+Produtividade: quantidade acumulada atual, responsável pelo início da NF.
+Validados sintaxe, bloqueio antes da consulta e descoberta em cenários simulados.
+Windows, SQL real e licença real precisam de validação pelo executável.
+Depois da validação funcional, atualizar Git (commit/push).
+
+Detalhes: nome/NF/processo no cabeçalho. Grade com GTIN, código, descrição,
+quantidade esperada, lida, saldo, localização, status e coletor.
+
+Horários de início e fim exibidos como HH:MM:SS. Valores inválidos preservados.
+
+Atualizar na tela principal consulta imediatamente. Nos detalhes, Atualizar
+busca novamente o SQL e atualiza os itens da NF aberta. Automático: 30 segundos
+na tela principal enquanto Atualização automática estiver marcada.
+
+Exportar Excel da tela principal movido para o topo, ao lado de Atualizar.
+
+Status AGUARDANDO exibido como Não iniciado, sem modificar o SQL.
+
+Monitoramento na tela principal: última/próxima consulta, pausa, conexão/licença
+e logs das últimas 200 mensagens. A retaguarda monitora SQL, não arquivos.
+
+Cabeçalho dos detalhes: rótulo NumDoc: no lugar de NF:.
+
+Coluna Indicador: pausa cinza (Não iniciado), relógio amarelo (Em andamento),
+check verde (Conferido), com descrição ao passar o mouse.
+
+Ver itens / Ver ocorrências: se não há registros, informa a ausência e
+não abre a grade vazia. Itens pendentes existentes continuam visíveis.
+
+Coluna principal: Num Doc no lugar de NF.
+
+Ícones ao lado do texto na coluna Status: amarelo Não iniciado, laranja
+Em andamento e verde Conferido. Coluna Indicador separada removida.
+
+Detalhes: totais esperado/lido/faltante e número de itens com falta. Itens
+lidos no topo, dataehora mais recente primeiro quando disponível. Sem horário
+de leitura, mantém a ordem recebida dentro do grupo de itens lidos.
+
+Botões da tela principal reunidos no rodapé. Um clique no registro abre os
+itens. Pendência de diagnóstico: vínculo de itens que aparecem sem leituras.
+
+Rodapé fora da área rolável: botões permanecem visíveis. Espaços e altura
+dos logs reduzidos para acomodar resolução 1366x768.
+
+1.0.31: resumo azul ao lado do título, mais espaço vertical para a tabela
+e margem inferior maior para os botões. Removido Itens com falta dos detalhes.
+Margem interna inferior ampliada na área de logs.
+
+1.0.31: subtítulo azul imediatamente abaixo do título, com espaçamento aproximado de 3 mm (11 pixels lógicos).
+
+1.0.31: barra de progresso por coletor/usuário na tabela Produtividade.
+Percentual = lido / esperado; preenchimento limitado a 100%; sem esperado mostra 0%.
+
+1.0.31: indicador quadrado pequeno no rodapé: Monitor rodando/parado/iniciando.
+Verifica ao abrir e a cada 30 segundos, mesmo com atualização de dados pausada.
+Inicia o executável da instalação identificada quando não há importador rodando,
+após validar a licença. Não inicia outra instalação quando há processo existente.
+Verde indica processo em execução, sem garantir sucesso das importações.
+Falhas aparecem nos logs e na dica do indicador; nova tentativa na próxima verificação.
+Indicador animado enquanto o processo está rodando ou iniciando.
+
+1.0.31: botão pequeno Tray ao lado do indicador do monitor. Abre o Tray
+da instalação do importador; se já estiver aberto, evita outra cópia.
+
+1.0.31: botão Usuários. Acesso inicial admin / config. Administradores podem
+cadastrar usuários e administradores e alterar senhas. Usuários comuns alteram
+a própria senha. Contas persistem em usuarios.json junto ao EXE, com hash e salt.
+Atualizar o ZIP não substitui usuarios.json. Limpeza SQL disponível apenas para administradores.
+
+1.0.31: Botão Zerar dados de conferência: totais e servidor/banco antes
+da confirmação digitando ZERAR. Limpa LancamentoExternoStatus, scanerroconf,
+scanocorconf, RespostasSync, prodConf e logConf, quando existentes, em transação.
+Encerra importador e Tray da mesma instalação; pausa a supervisão durante a limpeza.
+Mantém arquivos de entrada e dados dos coletores, configuração, licença e usuários.
+Após a limpeza retoma a supervisão e o importador pode processar arquivos pendentes.
+Não limpa estoque/ERP nem outros bancos. Barra de progresso nos detalhes, calculada por total lido / esperado.
+Contas e permissões verificadas com testes locais; limpeza não executada em SQL real.
+
+1.0.31: Zerar dados tem botão próprio no rodapé e exige autenticação admin.
+Usuários fica exclusivamente para cadastro de usuários e alteração de senhas.
+
+1.0.31: Tray mantém botão ativo durante a chamada, bloqueando duplicação pela
+verificação em andamento. Informa andamento, conclusão/erro e demora após 25s.
+
+1.0.31: botão Tray verde quando o processo da bandeja está em execução.
+Verifica a cada 30s; volta à cor padrão quando o Tray é encerrado.
+
+1.0.31: botão Tray azul, apenas abre a bandeja. Não altera o indicador do
+monitor nem dispara consultas extras. Consultas dos dados SQL com limite de 30s.
+A detecção do importador no Tray é corrigida no pacote separado do importador.
+
+1.0.31: Tray abre automaticamente após carregar a configuração/licença e dados
+do importador; botão Tray removido. Verifica se já está aberto antes de iniciar.
+
+1.0.31: barra animada azul no carregamento inicial, com etapas de configuração,
+licença e consulta das conferências. Some ao concluir ou exibir erro.
+Não exibe percentual estimado; atualização normal mantém a lista visível.
